@@ -1,4 +1,45 @@
-/.vscode
-/.zencoder
-/.zenflow
-/acli.exe
+# ============================================================
+# Flappy Bird — COAL Assembly Project
+# Windows / MinGW-W64 / GDI+
+# ============================================================
+
+# ----- Build artifacts -----
+build/
+*.o
+*.obj
+*.exe
+*.out
+
+# ----- GDI+ / Windows libs (if accidentally produced) -----
+*.dll
+*.lib
+*.a
+
+# ----- Game save data -----
+flappy_highscore.dat
+*.dat
+
+# ----- Temporary / editor files -----
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+
+# ----- IDE folders -----
+.vscode/
+.idea/
+.vs/
+*.suo
+*.user
+*.code-workspace
+
+# ----- OS-generated -----
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ----- Zencoder AI tool folders -----
+.zencoder/
+.zenflow/

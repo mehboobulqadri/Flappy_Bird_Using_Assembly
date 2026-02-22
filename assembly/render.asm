@@ -4,12 +4,194 @@
  #	compiled by GNU C version 15.2.0, GMP version 6.3.0, MPFR version 4.2.2, MPC version 1.3.1, isl version isl-0.27-GMP
 
  # GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072
- # options passed: -masm=intel -mtune=generic -march=x86-64
+ # options passed: -masm=intel -mtune=generic -march=x86-64 -O0 -fno-omit-frame-pointer
+
+# ============================================================================
+# FILE:    render.asm
+# SOURCE:  src/render.c
+# PURPOSE: GDI+ sprite rendering pipeline for Flappy Bird.
+#          Loads PNG sprites from disk, draws the game world each frame, and
+#          copies the finished back-buffer to the screen (double buffering).
+#
+# *** WARNING: THIS FILE IS SIGNIFICANTLY MORE COMPLEX THAN game.asm / audio.asm ***
+# The C source file includes <gdiplus.h> which pulls in hundreds of lines of
+# C++ template and inline method definitions.  The compiler inlines all of those
+# into THIS translation unit.  That produces ~1570 lines of GDI+ library code
+# BEFORE the first line of game source code appears.
+#
+# HOW TO READ THIS FILE:
+#   - Lines before _Z12GetMedalTexti (approx. line 1640)  → GDI+ library code
+#     (inlined constructors, Color helpers, etc.)  Skip this section on first read.
+#   - Lines from _Z12GetMedalTexti onward               → YOUR game code
+#     (GetMedalText, GetMedalColor, LoadImages, InitGraphics, CleanupGraphics,
+#      DrawParticles, DrawScore, DrawGame)              ← Start reading here.
+#   - Lines after DrawGame (_ZTVN7Gdiplus...)           → C++ vtables & RTTI data
+#
+# FUNCTIONS IN THIS FILE (game code only — skip GDI+ header section):
+#   GetMedalText(score)           - Return medal label string based on score
+#   GetMedalColor(score)          - Return COLORREF for medal badge color
+#   LoadImages()                  - Load all PNG sprites via Image::FromFile
+#   InitGraphics(hwnd)            - Start GDI+, create back-buffer DC/bitmap
+#   CleanupGraphics()             - Delete all Image objects, tear down GDI+
+#   DrawParticles(graphics)       - Render all live particles as colored ellipses
+#   DrawScore(graphics,score,x,y) - Render score using sprite digit images
+#   DrawGame(hdc)                 - Master render function: background → pipes →
+#                                   ground → bird → particles → UI → BitBlt
+#
+# HOW THIS FILE WAS GENERATED:
+#   g++ -S -O0 -masm=intel -fno-omit-frame-pointer src/render.c
+#   (same flags as game.asm — see game.asm file header for full flag explanation)
+#   Note: -fverbose-asm was NOT used here, so you will see the raw compiler
+#   comments like  # src/render.c:N  from -fverbose-asm on C source lines, but
+#   NOT the register-variable hint comments seen in game.asm.
+#
+# WINDOWS x64 CALLING CONVENTION (same as all other .asm files):
+#   Integer/pointer arguments 1-4  : RCX, RDX, R8, R9
+#   Float arguments 1-4            : XMM0, XMM1, XMM2, XMM3
+#   Return value (int/ptr)         : RAX
+#   Return value (float)           : XMM0
+#   Caller must reserve 32 bytes "shadow space" before every CALL
+#   Stack must be 16-byte aligned at the point of CALL
+#
+# C++ NAME MANGLING — render.asm has the most mangling of any file:
+#   The C++ compiler encodes full type signatures into function names.
+#   Decoding key (Itanium ABI used by g++):
+#     _Z          = mangled name prefix
+#     N...E       = namespace-qualified name  (e.g. N7Gdiplus8GraphicsE)
+#     number+name = name with length prefix   (e.g. 8Graphics)
+#     C1          = complete constructor
+#     D1          = complete destructor
+#     D0          = deleting destructor  (calls D1 then operator delete)
+#     K           = const qualifier on 'this'
+#     v           = void return / void arg
+#     P           = pointer   (PK = pointer to const)
+#     R           = reference (RK = const reference)
+#     i           = int,   h = unsigned char,  f = float,  E = enum
+#
+#   GAME FUNCTION NAMES (demangled → mangled):
+#     GetMedalText(int)                    → _Z12GetMedalTexti
+#     GetMedalColor(int)                   → _Z13GetMedalColori
+#     LoadImages()                         → _Z10LoadImagesv
+#     InitGraphics(HWND*)                  → _Z12InitGraphicsP6HWND__
+#     CleanupGraphics()                    → _Z15CleanupGraphicsv
+#     DrawParticles(Gdiplus::Graphics*)    → _Z13DrawParticlesPN7Gdiplus8GraphicsE
+#     DrawScore(Gdiplus::Graphics*,int,int,int) → _Z9DrawScorePN7Gdiplus8GraphicsEiii
+#     DrawGame(HDC*)                       → _Z8DrawGameP5HDC__
+#
+#   KEY GDI+ METHOD NAMES (seen in call instructions):
+#     Gdiplus::Image::FromFile(wchar_t*, int)       → _ZN7Gdiplus5Image8FromFileEPKwi
+#     Gdiplus::Image::GetLastStatus() const         → _ZNK7Gdiplus5Image13GetLastStatusEv
+#     Gdiplus::Image::GetWidth()                    → _ZN7Gdiplus5Image8GetWidthEv
+#     Gdiplus::Image::GetHeight()                   → _ZN7Gdiplus5Image9GetHeightEv
+#     Gdiplus::Color::Color(byte,byte,byte,byte)    → _ZN7Gdiplus5ColorC1Ehhhh
+#     Gdiplus::Color::MakeARGB(byte,byte,byte,byte) → _ZN7Gdiplus5Color8MakeARGBEhhhh
+#     Gdiplus::SolidBrush::SolidBrush(Color&)      → _ZN7Gdiplus10SolidBrushC1ERKNS_5ColorE
+#     Gdiplus::SolidBrush::~SolidBrush()           → _ZN7Gdiplus10SolidBrushD1Ev
+#     Gdiplus::Graphics::Graphics(HDC*)             → _ZN7Gdiplus8GraphicsC1EP5HDC__
+#     Gdiplus::Graphics::~Graphics()               → _ZN7Gdiplus8GraphicsD1Ev
+#     Gdiplus::Graphics::DrawImage(Image*,int,int)     → _ZN7Gdiplus8Graphics9DrawImageEPNS_5ImageEii
+#     Gdiplus::Graphics::DrawImage(Image*,int,int,int,int) → _ZN7Gdiplus8Graphics9DrawImageEPNS_5ImageEiiii
+#     Gdiplus::Graphics::FillEllipse(Brush*,int,int,int,int) → _ZN7Gdiplus8Graphics11FillEllipseEPKNS_5BrushEiiii
+#     Gdiplus::Graphics::SetInterpolationMode(mode) → _ZN7Gdiplus8Graphics20SetInterpolationModeENS_17InterpolationModeE
+#     Gdiplus::Graphics::TranslateTransform(x,y)    → _ZN7Gdiplus8Graphics18TranslateTransformEffNS_11MatrixOrderE
+#     Gdiplus::Graphics::RotateTransform(angle)     → _ZN7Gdiplus8Graphics15RotateTransformEfNS_11MatrixOrderE
+#     Gdiplus::Graphics::ResetTransform()           → _ZN7Gdiplus8Graphics14ResetTransformEv
+#
+# GDI+ DOUBLE-BUFFER ARCHITECTURE:
+#   Problem: Drawing directly to screen causes visible flicker (each element
+#            drawn one-at-a-time is briefly visible as the next draws).
+#   Solution: Draw everything to an off-screen bitmap (the "back buffer"),
+#             then copy the completed frame to the screen in one fast blit.
+#
+#   The back-buffer components (global variables in .bss section):
+#     hdcBackBuffer  — an off-screen GDI Device Context (like a virtual screen)
+#     hbmBackBuffer  — a GDI Bitmap object (the off-screen pixel memory)
+#     gdiplusToken   — ULONG_PTR returned by GdiplusStartup, used to shutdown GDI+
+#
+#   Rendering flow each frame:
+#     1. Graphics graphics(hdcBackBuffer)   — wrap back-buffer DC in GDI+ object
+#     2. Draw all scene elements into graphics (writes to off-screen bitmap)
+#     3. BitBlt(hdc, ..., hdcBackBuffer, ..., SRCCOPY)  — copy back-buffer to screen
+#     This ensures the screen only sees complete frames, eliminating flicker.
+#
+# VIRTUAL FUNCTION DISPATCH IN C++ (important for understanding CleanupGraphics):
+#   GDI+ Image, Brush, SolidBrush are C++ classes with virtual destructors.
+#   When you call  delete ptr   where ptr is an Image*, the compiler does NOT
+#   generate a direct call — it uses a vtable lookup:
+#     mov rdx, [rax]        ; rdx = vtable pointer (stored at object[0])
+#     add rdx, 8            ; rdx = &vtable[1]  (skip vtable offset slot)
+#     mov rdx, [rdx]        ; rdx = destructor function pointer
+#     mov rcx, rax          ; rcx = 'this'  (arg1)
+#     call rdx              ; call virtual destructor
+#   This guarantees the most-derived destructor runs even through a base pointer.
+#
+# .linkonce discard / .linkonce same_size DIRECTIVES:
+#   GDI+ inline methods are emitted into their own named sections with .linkonce.
+#   When multiple translation units include <gdiplus.h>, each emits its own copy.
+#   The linker discards all but one copy (for 'discard') or keeps the largest
+#   (for 'same_size').  This prevents duplicate symbol errors.
+#
+# .refptr.game / .refptr.particles:
+#   Because game[] and particles[] are defined in game.c (a separate translation
+#   unit), render.c cannot access them with simple [rip] addressing.
+#   The linker generates indirection pointers:
+#     .refptr.game:     .quad game      ; 8-byte pointer → game global
+#     .refptr.particles:.quad particles ; 8-byte pointer → particles global
+#   Code loads these via:
+#     mov rax, .refptr.game[rip]   ; rax = address of game struct
+#     mov eax, [rax+offset]        ; eax = game.field
+# ============================================================================
+
 	.text
+
+# ============================================================================
+# SECTION 1: GDI+ HEADER INLINED CODE  (~lines 146 to ~1640)
+# ============================================================================
+# *** YOU DO NOT NEED TO STUDY THIS SECTION FOR THE GAME LOGIC ***
+#
+# Everything in this section comes from:
+#   #include <gdiplus.h>   (which the C++ compiler pulls into render.c)
+#
+# The gdiplus.h header defines many C++ class methods as 'inline', meaning
+# the compiler is REQUIRED to emit their machine code into every translation
+# unit that uses them.  Because render.c uses Gdiplus::Color, Gdiplus::Image,
+# Gdiplus::Graphics, and Gdiplus::SolidBrush — all of their constructors,
+# destructors, and helper methods end up compiled into render.asm.
+#
+# FUNCTIONS INLINED FROM GDI+ HEADERS (partial list):
+#   _ZN7Gdiplus19GdiplusStartupInputC1EPvii  = GdiplusStartupInput::GdiplusStartupInput(...)
+#   _ZN7Gdiplus5Color8MakeARGBEhhhh          = Color::MakeARGB(alpha, r, g, b)
+#   _ZN7Gdiplus5ColorC1Ehhhh                 = Color::Color(alpha, r, g, b)
+#   _ZN7Gdiplus10SolidBrushC1ERKNS_5ColorE   = SolidBrush::SolidBrush(const Color&)
+#   _ZN7Gdiplus10SolidBrushD1Ev              = SolidBrush::~SolidBrush()
+#   _ZN7Gdiplus8GraphicsC1EP5HDC__           = Graphics::Graphics(HDC*)
+#   _ZN7Gdiplus8GraphicsD1Ev                 = Graphics::~Graphics()
+#   _ZN7Gdiplus8Graphics9DrawImageE...       = Graphics::DrawImage(...) [overloads]
+#   _ZN7Gdiplus8Graphics11FillEllipseE...    = Graphics::FillEllipse(...)
+#   (... and ~60 more GDI+ methods ...)
+#
+# INTERESTING PATTERN TO NOTICE: the GDI+ C++ methods call the underlying
+# GDI+ C API functions (which are the real implementations in gdiplus.dll):
+#   Graphics::DrawImage(...)  → calls GdipDrawImageRectI(...)
+#   Graphics::FillEllipse()   → calls GdipFillEllipseI(...)
+#   SolidBrush::SolidBrush()  → calls GdipCreateSolidFill(...)
+#   etc.
+# This two-level pattern (C++ wrapper → C function) is a common Windows API design.
+#
+# .text$_ZN7...  NAMED SECTIONS WITH LINKONCE:
+#   Each GDI+ method gets its own named .text section:
+#     .section .text$_ZN7Gdiplus19GdiplusStartupInputC1EPvii,"x"
+#   The "x" flag marks it as executable code.  The .linkonce discard directive
+#   tells the linker to keep only ONE copy across all translation units that
+#   include this header.  Without this, linking multiple .o files would fail
+#   with "duplicate symbol" errors for every inlined GDI+ method.
+#
+# SKIP TO LINE ~1640 for the first line of your game source code: GetMedalText()
+# ============================================================================
 	.section .rdata,"dr"
 	.align 4
 _ZN7GdiplusL15FlatnessDefaultE:
-	.long	1048576000
+	.long	1048576000              # GDI+ FlatnessDefault = 0.25f (IEEE 754 bits)
 	.section	.text$_ZN7Gdiplus19GdiplusStartupInputC1EPvii,"x"
 	.linkonce discard
 	.align 2
@@ -1569,7 +1751,48 @@ imgMessage:
 .LC2:
 	.ascii "SILVER\0"
 .LC3:
-	.ascii "BRONZE\0"
+	.ascii "BRONZE\0"                # medal label for score >= 10
+
+# ============================================================================
+# SECTION 2: GAME SOURCE CODE BEGINS HERE
+# ============================================================================
+# Everything below this line corresponds directly to src/render.c.
+# The .LC0-.LC3 string constants above are the medal tier labels.
+#
+# STRING CONSTANT MAP (.rdata section above):
+#   .LC0  = "PLATINUM\0"  — score >= 40
+#   .LC1  = "GOLD\0"      — score >= 30
+#   .LC2  = "SILVER\0"    — score >= 20
+#   .LC3  = "BRONZE\0"    — score >= 10
+# ============================================================================
+
+# ============================================================================
+# FUNCTION: GetMedalText(int score)  →  const char*
+# SOURCE:   src/render.c:20-26
+# MANGLED:  _Z12GetMedalTexti
+#
+# PURPOSE: Returns a pointer to a medal tier label string based on score.
+#          Returns NULL (0) if score < 10 (no medal).
+#
+# ARGUMENT:
+#   ECX = score  (int, Win64 arg1)
+#
+# RETURN VALUE:
+#   RAX = pointer to null-terminated medal string, or 0 (NULL)
+#
+# STACK FRAME:
+#   push rbp; mov rbp, rsp    — minimal frame, no sub rsp (no local vars)
+#   [rbp+16] = score          — shadow space, ecx spilled here
+#
+# PATTERN: Cascade of integer comparisons, each compiling  ">= N"  as  "> N-1"
+#   In assembly, there is no "jge" that works for "x >= N" cleanly.
+#   The compiler transforms:  if (score >= 40)  →  cmp score, 39; jle skip
+#   ("if score is NOT > 39, skip this branch")
+#   This avoids a separate subtraction and keeps comparisons efficient.
+#
+# RETURN MECHANISM: All return paths set RAX then jump to .L87 (the ret).
+#   The final  mov eax, 0  in .L90 sets RAX = NULL for the "no medal" case.
+# ============================================================================
 	.text
 	.globl	_Z12GetMedalTexti
 	.def	_Z12GetMedalTexti;	.scl	2;	.type	32;	.endef
@@ -1621,6 +1844,33 @@ _Z12GetMedalTexti:
 	pop	rbp	 #
 	ret	
 	.seh_endproc
+# ============================================================================
+# FUNCTION: GetMedalColor(int score)  →  COLORREF
+# SOURCE:   src/render.c:29-35
+# MANGLED:  _Z13GetMedalColori
+#
+# PURPOSE: Returns a Windows COLORREF (packed BGR 32-bit int) for the medal
+#          badge color corresponding to the score tier.
+#
+# ARGUMENT:
+#   ECX = score  (int, Win64 arg1)
+#
+# RETURN VALUE:
+#   EAX = COLORREF  — a Windows RGB() macro result packed as 0x00BBGGRR
+#   NOTE: Windows RGB() stores bytes as R in bits 0-7, G in bits 8-15, B in 16-23.
+#         The compiler pre-computes the full packed constant at compile time,
+#         so no RGB() function call appears in the assembly — just  mov eax, value.
+#
+# PRE-COMPUTED COLORREF VALUES (the compiler folds RGB() at compile time):
+#   RGB(229,228,226) = 0x00E4E4E5 = 14869733  — PLATINUM (near-white silver)
+#   RGB(255,215,  0) = 0x0000D7FF = 55295      — GOLD     (golden yellow)
+#   RGB(192,192,192) = 0x00C0C0C0 = 12632256   — SILVER   (grey)
+#   RGB(205,127, 50) = 0x00327FCD = 3309517    — BRONZE   (copper-brown)
+#   RGB(255,255,255) = 0x00FFFFFF = 16777215   — WHITE    (no medal)
+#
+# PATTERN: Same ">= N compiled as > N-1" cascade as GetMedalText().
+#   No pointer lookups needed — all return values are integer immediates.
+# ============================================================================
 	.globl	_Z13GetMedalColori
 	.def	_Z13GetMedalColori;	.scl	2;	.type	32;	.endef
 	.seh_proc	_Z13GetMedalColori
@@ -1671,6 +1921,26 @@ _Z13GetMedalColori:
 	pop	rbp	 #
 	ret	
 	.seh_endproc
+# ============================================================================
+# STRING CONSTANTS FOR LoadImages() — Wide-Character (UTF-16LE) File Paths
+# ============================================================================
+# Image::FromFile() takes a const wchar_t* (wide string), NOT a regular char*.
+# On Windows, wchar_t is 2 bytes (UTF-16LE encoding).
+# The compiler emits wide strings as .ascii with \0 inserted after each character:
+#   "a\0s\0s\0e\0t\0s\0"  = UTF-16LE for "assets" (each char is 2 bytes)
+# The final \0\0 is the UTF-16LE null terminator (2 zero bytes).
+# This is why each sprite path looks double-spaced — it literally is, in memory.
+#
+# .LC4  = L"assets/sprites_desktop/background-day.png"
+# .LC5  = L"assets/sprites_desktop/base.png"
+# .LC6  = L"assets/sprites_desktop/pipe-green.png"
+# .LC7  = L"assets/sprites_desktop/yellowbird-downflap.png"  (birdFrame[0])
+# .LC8  = L"assets/sprites_desktop/yellowbird-midflap.png"   (birdFrame[1])
+# .LC9  = L"assets/sprites_desktop/yellowbird-upflap.png"    (birdFrame[2])
+# .LC10 = L"assets/sprites_desktop/%d.png"  (format template for digit sprites)
+# .LC11 = L"assets/sprites_desktop/gameover.png"
+# .LC12 = L"assets/sprites_desktop/message.png"
+# ============================================================================
 	.section .rdata,"dr"
 	.align 8
 .LC4:
@@ -1699,6 +1969,74 @@ _Z13GetMedalColori:
 	.align 8
 .LC12:
 	.ascii "a\0s\0s\0e\0t\0s\0/\0s\0p\0r\0i\0t\0e\0s\0_\0d\0e\0s\0k\0t\0o\0p\0/\0m\0e\0s\0s\0a\0g\0e\0.\0p\0n\0g\0\0\0"
+# ============================================================================
+# FUNCTION: LoadImages()  →  BOOL
+# SOURCE:   src/render.c:38-69
+# MANGLED:  _Z10LoadImagesv
+#
+# PURPOSE: Loads all game sprite PNG files from disk into Image* global pointers.
+#          Returns TRUE if all images loaded successfully, FALSE on any failure.
+#
+# ARGUMENTS: none
+#
+# RETURN VALUE:
+#   EAX = 0 (FALSE) if any image failed to load, else 0 (wait — see below)
+#   Actually: returns 0=FALSE (failure) or the function reaches the end
+#   returning whatever was last in EAX (implies TRUE path falls through).
+#
+# STACK FRAME:
+#   sub rsp, 560           — large allocation! 560 bytes for:
+#                            • 32 bytes Win64 shadow space
+#                            • 256-byte WCHAR numPath[256] buffer  (swprintf target)
+#                            • padding and alignment
+#   lea rbp, 128[rsp]      — rbp is offset from rsp, not at rsp.
+#                            [rbp+N] locals are positive, [rsp+M] is shadow space.
+#
+# IMAGE LOADING PATTERN (repeated for each sprite):
+#   1. lea rcx, .LC4[rip]            ; rcx = wide-string path (wchar_t*)
+#      mov edx, 0                    ; edx = useEmbeddedColorManagement = false
+#      call Image::FromFile           ; returns Image* in RAX
+#      mov imgBackground[rip], rax   ; store pointer globally
+#
+#   2. mov rax, imgBackground[rip]   ; reload pointer
+#      test rax, rax                 ; is it NULL?
+#      je .L98                       ; NULL → error
+#      mov rcx, rax
+#      call Image::GetLastStatus()   ; returns Gdiplus::Status enum
+#      test eax, eax                 ; is status == Ok (0)?
+#      je .L99                       ; Ok → continue
+#   .L98: (failure path)
+#      mov eax, 0                    ; iftmp = TRUE (error condition)
+#      jmp .L100
+#   .L99: (success path)
+#      mov eax, 0                    ; iftmp = FALSE (no error)
+#   .L100:
+#      test al, al                   ; if error flag set:
+#      je .L101                      ; no error → continue to next image
+#      mov eax, 0                    ; RETURN FALSE
+#      jmp .L131                     ; jump to epilogue
+#
+#   NOTE: The compiler's iftmp pattern looks confusing because it tests the
+#   ABSENCE of an error. "iftmp = 1" means "the NULL-check or status-check fired",
+#   and then al=1 means "there WAS an error" → return FALSE.
+#
+# DIGIT SPRITES:
+#   For imgNumbers[0..9], the C code uses:
+#     swprintf(numPath, 256, L"assets/sprites_desktop/%d.png", i)
+#   swprintf is the wide-char version of sprintf.  The .LC10 wide string is
+#   the format template with %d for the digit index.
+#
+# GLOBALS WRITTEN:
+#   imgBackground    — background-day.png
+#   imgGround        — base.png
+#   imgPipeGreen     — pipe-green.png
+#   imgBirdFrames[0] — yellowbird-downflap.png
+#   imgBirdFrames[1] — yellowbird-midflap.png
+#   imgBirdFrames[2] — yellowbird-upflap.png
+#   imgNumbers[0..9] — 0.png through 9.png
+#   imgGameOver      — gameover.png
+#   imgMessage       — message.png
+# ============================================================================
 	.text
 	.globl	_Z10LoadImagesv
 	.def	_Z10LoadImagesv;	.scl	2;	.type	32;	.endef
@@ -2041,10 +2379,76 @@ _Z10LoadImagesv:
 	.seh_endproc
 	.section .rdata,"dr"
 .LC13:
-	.ascii "Error\0"
+	.ascii "Error\0"                 # MessageBox title for sprite load failure
 	.align 8
 .LC14:
 	.ascii "Failed to load game sprites!\12Make sure assets/sprites_desktop folder exists.\0"
+	                                 # \12 is octal for newline (\n). MessageBox body text.
+
+# ============================================================================
+# FUNCTION: InitGraphics(HWND* hwnd)  →  void
+# SOURCE:   src/render.c:71-84
+# MANGLED:  _Z12InitGraphicsP6HWND__
+#
+# PURPOSE: One-time initialization at game startup:
+#   1. Start the GDI+ rendering subsystem (GdiplusStartup)
+#   2. Create the off-screen back-buffer for double-buffering
+#   3. Load all sprite images from disk (LoadImages)
+#   4. Show an error MessageBox if sprites couldn't be loaded
+#
+# ARGUMENT:
+#   RCX = hwnd  (HWND*, pointer to window handle, Win64 arg1)
+#
+# STACK FRAME:
+#   sub rsp, 64     — 64 bytes: 32 shadow + 32 bytes for local GdiplusStartupInput struct
+#   [rbp+16]        = hwnd argument (spilled from RCX)
+#   [rbp-8]         = hdc (temp HDC from GetDC, used to create compatible DC)
+#   [rbp-32]        = gdiplusStartupInput (GdiplusStartupInput struct, 24 bytes)
+#                     Layout: [rbp-32]=GdiplusVersion(1), [rbp-24]=DebugEventCallback(0),
+#                             [rbp-16]=SuppressBackgroundThread(0), [rbp-12]=SuppressExternalCodecs(0)
+#
+# STEP-BY-STEP:
+#
+#   --- GDI+ STARTUP ---
+#   lea rax, -32[rbp]           ; rax = &gdiplusStartupInput (stack-local struct)
+#   mov r9d,r8d,edx = 0         ; constructor args: NULL, 0, 0 (suppress options)
+#   mov rcx, rax
+#   call GdiplusStartupInput::GdiplusStartupInput(NULL,0,0)
+#                               ; Initialize the struct on the stack
+#   lea rax, -32[rbp]           ; rax = &gdiplusStartupInput
+#   lea rcx, gdiplusToken[rip]  ; rcx = &gdiplusToken (output token)
+#   mov r8d, 0                  ; r8 = NULL (no output for GdiplusStartupOutput)
+#   mov rdx, rax                ; rdx = &gdiplusStartupInput
+#   call GdiplusStartup          ; starts GDI+ subsystem, fills gdiplusToken
+#
+#   --- BACK BUFFER CREATION ---
+#   mov rcx, hwnd
+#   call GetDC(hwnd)            ; rax = screen DC for the game window
+#   mov [rbp-8], rax            ; hdc = screen DC
+#   mov rcx, hdc
+#   call CreateCompatibleDC(hdc) ; creates an off-screen DC matching screen format
+#   mov hdcBackBuffer[rip], rax  ; store it globally
+#   mov edx, 1280               ; width = WINDOW_WIDTH
+#   mov r8d, 720                ; height = WINDOW_HEIGHT
+#   call CreateCompatibleBitmap(hdc, 1280, 720) ; creates the off-screen bitmap
+#   mov hbmBackBuffer[rip], rax  ; store globally
+#   call SelectObject(hdcBackBuffer, hbmBackBuffer) ; link bitmap into the DC
+#   call ReleaseDC(hwnd, hdc)    ; release the screen DC (no longer needed)
+#
+#   --- SPRITE LOADING ---
+#   call LoadImages()           ; load all PNG sprites
+#   test eax, eax               ; did LoadImages return non-zero (success)?
+#   sete al                     ; al = 1 if LoadImages returned 0 (failure)
+#   test al, al                 ; is it a failure?
+#   je .L134                    ; if success, skip error box
+#   call MessageBoxA(hwnd, .LC14, .LC13, MB_ICONERROR=16)
+#   .L134:
+#   nop; epilogue
+#
+# NOTE ON sete: This is "set byte if equal" — sets AL=1 if ZF=1 (i.e., if the
+# previous test set ZF, meaning LoadImages returned 0).  Combined with test eax,eax,
+# "sete al" gives al=1 when eax was 0 (FALSE return from LoadImages = failure).
+# ============================================================================
 	.text
 	.globl	_Z12InitGraphicsP6HWND__
 	.def	_Z12InitGraphicsP6HWND__;	.scl	2;	.type	32;	.endef
@@ -2131,6 +2535,50 @@ _Z12InitGraphicsP6HWND__:
 	pop	rbp	 #
 	ret	
 	.seh_endproc
+# ============================================================================
+# FUNCTION: CleanupGraphics()  →  void
+# SOURCE:   src/render.c:86-98
+# MANGLED:  _Z15CleanupGraphicsv
+#
+# PURPOSE: Release all GDI+ resources at program exit:
+#   1. delete all Image* sprite objects (using virtual destructor dispatch)
+#   2. DeleteObject(hbmBackBuffer) — free the GDI bitmap
+#   3. DeleteDC(hdcBackBuffer)    — free the off-screen DC
+#   4. GdiplusShutdown(gdiplusToken) — shut down GDI+ subsystem
+#
+# ARGUMENTS: none
+#
+# STACK FRAME:
+#   sub rsp, 48   — 48 bytes: 32 shadow + 8 local (i) + 8 alignment
+#   [rbp-4]  = i  (loop counter for imgBirdFrames loop)
+#   [rbp-8]  = i  (loop counter for imgNumbers loop)
+#
+# VIRTUAL DESTRUCTOR DISPATCH — "delete imgBackground" compiles to:
+#   mov rax, imgBackground[rip]   ; rax = Image* pointer
+#   test rax, rax                 ; is it NULL?
+#   je .L136                      ; if NULL, skip (already deleted or never loaded)
+#   mov rax, imgBackground[rip]   ; reload (redundant check emitted by -O0)
+#   test rax, rax                 ; second null check
+#   je .L136
+#   mov rdx, [rax]                ; rdx = vtable pointer (first 8 bytes of object)
+#   add rdx, 8                    ; rdx points to vtable[1] (skip vtable offset entry)
+#   mov rdx, [rdx]                ; rdx = virtual destructor function pointer
+#   mov rcx, rax                  ; rcx = 'this' pointer
+#   call rdx                      ; call virtual destructor (dispatched via vtable)
+#
+# WHY TWO NULL CHECKS?
+#   The -O0 flag prevents any optimization. The compiler emits the null check
+#   twice: once for the outer  if (imgBackground)  and once for the inner
+#   implicit check that C++ inserts before calling delete on a pointer.
+#   With -O2 these would collapse into one check.
+#
+# ARRAY ELEMENT LOOP: For imgBirdFrames[i] (i=0..2) and imgNumbers[i] (i=0..9):
+#   cdqe                ; sign-extend i from EAX to RAX (for 64-bit addressing)
+#   lea rdx, [rax*8]    ; rdx = i*8  (each Image* is 8 bytes, pointer-sized)
+#   lea rax, imgBirdFrames[rip] ; rax = base of pointer array
+#   mov rax, [rdx+rax]  ; rax = imgBirdFrames[i]
+#   (then same virtual destructor dispatch as above)
+# ============================================================================
 	.globl	_Z15CleanupGraphicsv
 	.def	_Z15CleanupGraphicsv;	.scl	2;	.type	32;	.endef
 	.seh_proc	_Z15CleanupGraphicsv
@@ -2371,6 +2819,69 @@ _ZN7Gdiplus10SolidBrushD0Ev:
 	pop	rbp	 #
 	ret	
 	.seh_endproc
+# ============================================================================
+# FUNCTION: DrawParticles(Gdiplus::Graphics* graphics)  →  void
+# SOURCE:   src/render.c:100-112
+# MANGLED:  _Z13DrawParticlesPN7Gdiplus8GraphicsE
+#
+# PURPOSE: Iterate all 50 particle slots. For any particle with life > 0,
+#          extract its color channels, compute alpha from remaining life,
+#          create a GDI+ Color+SolidBrush, and draw a 4x4 pixel ellipse.
+#
+# ARGUMENT:
+#   RCX = graphics  (Gdiplus::Graphics*, Win64 arg1)
+#
+# STACK FRAME:
+#   push rbx           — RBX is callee-saved; needed to preserve across exception path
+#   sub rsp, 104       — 104 bytes: 32 shadow + 36-byte SolidBrush struct +
+#                        12-byte Color struct + loop var + alignment
+#   lea rbp, 96[rsp]   — rbp is offset from rsp
+#   [rbp+32]           = graphics argument
+#   [rbp-4]            = i  (loop counter, 0..49)
+#   [rbp-8]            = alpha  (computed transparency)
+#   [rbp-12]           = color (Gdiplus::Color struct, 4 bytes)
+#   [rbp-48]           = brush (Gdiplus::SolidBrush object, ~36 bytes on stack)
+#
+# PARTICLE STRUCT INDEXING (i*24, same pattern as game.asm chunk 5):
+#   Particle struct = 24 bytes: x(4)+y(4)+vx(4)+vy(4)+color(4)+life(4)
+#   i*24 computed as:  rdx=i; rax=rdx; rax+=rax(=2i); rax+=rdx(=3i); rax<<=3(=24i)
+#   particles[i].life  is at offset 16 from particles[i] base
+#   particles[i].color is at offset 20
+#   particles[i].y     is at offset 4
+#   particles[i].x     is at offset 0
+#
+# COLOR CHANNEL EXTRACTION from COLORREF (Windows BGR format):
+#   The Windows COLORREF stores: bits 0-7=R, bits 8-15=G, bits 16-23=B
+#   GetRValue(color) = (color >> 16) & 0xFF  → Blue channel (confusingly named)
+#   GetGValue(color) = (color >> 8)  & 0xFF  → Green channel
+#   GetBValue(color) = (color >> 0)  & 0xFF  → Red channel (confusingly named)
+#
+#   In assembly:
+#     shr eax, 16 ; movzx ecx, al  → R argument (actually the Blue byte)
+#     shr ax, 8   ; movzx r9d, al  → G argument
+#     movzx r8d, al               → B argument (Red byte)
+#
+#   These go into Color::Color(alpha, r, g, b) as:
+#     rcx = this (Color struct address on stack)
+#     edx = alpha (byte, from [rbp-8])
+#     r8d = R byte extracted from color (bit 16-23 of COLORREF)
+#     r9d = G byte (bit 8-15)
+#     [rsp+32] = B byte (bit 0-7)  ← 5th argument goes on stack
+#
+# ALPHA COMPUTATION:
+#   alpha = (life * 255) / 40
+#   Compiler implements (life*255): life<<8 - life = life*(256-1) = life*255
+#   Then divides by 40 using magic number 1717986919 (same trick as game.asm)
+#   This makes particles fade out from fully opaque (life=40) to transparent (life=1).
+#
+# C++ EXCEPTION HANDLING (LSDA tables at end of function):
+#   SolidBrush is constructed on the stack. If FillEllipse() throws an exception,
+#   the C++ runtime must destroy the SolidBrush (call its destructor) before
+#   unwinding. The .seh_handler / LLSDA tables encode which instructions are
+#   "within the SolidBrush lifetime" for the exception unwinder.
+#   The .LEHB/.LEHE labels mark the begin/end of exception-active regions.
+#   This machinery is automatic C++ RAII — it doesn't affect normal execution.
+# ============================================================================
 	.text
 	.globl	_Z13DrawParticlesPN7Gdiplus8GraphicsE
 	.def	_Z13DrawParticlesPN7Gdiplus8GraphicsE;	.scl	2;	.type	32;	.endef
@@ -2580,46 +3091,147 @@ _Z13DrawParticlesPN7Gdiplus8GraphicsE:
 .LLSDACSE8692:
 	.text
 	.seh_endproc
+
+# ============================================================================
+# STRING CONSTANT FOR DrawScore() — sprintf format
+# ============================================================================
+# .LC15  = "%d\0"  — format string passed to __mingw_sprintf to convert
+#          the integer score into a decimal ASCII string ("0", "42", "123"...)
+# ============================================================================
 	.section .rdata,"dr"
 .LC15:
 	.ascii "%d\0"
+
+# ============================================================================
+# FUNCTION: DrawScore(Gdiplus::Graphics* graphics, int score, int centerX, int y)
+# SOURCE:   src/render.c:114-133
+# MANGLED:  _Z9DrawScorePN7Gdiplus8GraphicsEiii
+#
+# PURPOSE: Render the score value on screen using pre-loaded digit sprite images.
+#          Converts the integer score to a string, measures the total pixel width
+#          of all digit sprites, then draws them centered around centerX.
+#
+# ARGUMENTS (Win64 calling convention — see audio.asm header for full ABI):
+#   RCX = graphics*  — Gdiplus::Graphics* object to draw into
+#   EDX = score      — integer score value to display
+#   R8D = centerX    — X pixel coordinate to center digits around
+#   R9D = y          — Y pixel coordinate for top of digit sprites
+#
+# RETURN VALUE: void (no return)
+#
+# STACK FRAME (sub rsp, 80  →  80 bytes total):
+#   [rbp+16]  = graphics  (spilled from RCX — 8 bytes)
+#   [rbp+24]  = score     (spilled from EDX — 4 bytes)
+#   [rbp+32]  = centerX   (spilled from R8D — 4 bytes)
+#   [rbp+40]  = y         (spilled from R9D — 4 bytes)
+#   [rbp- 4]  = totalWidth (int) — accumulates total pixel width of all digits
+#   [rbp- 8]  = i         (int, loop 1 — measure pass)
+#   [rbp-12]  = x         (int) — current X draw position (advances each digit)
+#   [rbp-16]  = i         (int, loop 2 — draw pass)
+#   [rbp-20]  = len       (int) — result of strlen(scoreStr)
+#   [rbp-24]  = digit     (int, draw loop)
+#   [rbp-28]  = digit     (int, measure loop)
+#   [rbp-48]  = scoreStr[16] — char buffer target for sprintf
+#   + 32 bytes Win64 shadow space at bottom of frame
+#
+# ALGORITHM — TWO PASSES over the digit character string:
+#
+#   Step 1: sprintf(scoreStr, "%d", score)
+#           Converts the integer score to decimal ASCII string in scoreStr[].
+#           e.g. score=42  →  scoreStr[] = "42\0"
+#               score=0   →  scoreStr[] = "0\0"
+#
+#   Step 2: len = strlen(scoreStr)
+#           Count how many digit characters there are.
+#
+#   PASS 1 — MEASURE (loop .L160):
+#     for i=0; i<len; i++
+#       digit = scoreStr[i] - '0'        ← subtract ASCII 48 to get index 0..9
+#       if (imgNumbers[digit] != NULL)
+#         totalWidth += imgNumbers[digit]->GetWidth()
+#     Goal: find the total pixel width so the score can be centered.
+#
+#   Centering:
+#     x = centerX - totalWidth / 2       ← left edge of first digit
+#     (signed division by 2 uses SAR trick — see below)
+#
+#   PASS 2 — DRAW (loop .L163):
+#     for i=0; i<len; i++
+#       digit = scoreStr[i] - '0'
+#       if (imgNumbers[digit] != NULL)
+#         graphics->DrawImage(imgNumbers[digit], x, y)  ← draw digit sprite
+#         x += imgNumbers[digit]->GetWidth()            ← advance cursor right
+#
+# KEY INSTRUCTION PATTERNS:
+#
+#   Array indexing — imgNumbers[digit]:
+#     cdqe                       ; sign-extend digit (EAX) to 64-bit RAX
+#     lea rdx, 0[0+rax*8]       ; rdx = digit * 8  (Image* pointers are 8 bytes)
+#     lea rax, imgNumbers[rip]   ; rax = base address of imgNumbers[] global array
+#     mov rax, [rdx+rax]         ; rax = imgNumbers[digit]  (dereference pointer)
+#
+#   Character extraction — scoreStr[i] - '0':
+#     cdqe                               ; sign-extend i (EAX) to 64-bit RAX
+#     movzx eax, BYTE PTR -48[rbp+rax]  ; load byte scoreStr[i], zero-extend
+#     movsx eax, al                      ; sign-extend byte AL to full int EAX
+#     sub eax, 48                        ; subtract ASCII '0' (48) → value 0..9
+#
+#   Signed division by 2 for centering (-(totalWidth/2)):
+#     mov edx, eax   ; copy totalWidth
+#     shr edx, 31    ; shift sign bit to bit 0 — gives 1 if negative, 0 if positive
+#     add eax, edx   ; bias: rounds toward zero for negative values
+#     sar eax        ; arithmetic right shift by 1 = divide by 2 (with correct rounding)
+#     neg eax        ; negate because formula is centerX MINUS half-width
+#   This is GCC's canonical -O0 pattern for signed integer division by 2.
+# ============================================================================
 	.text
 	.globl	_Z9DrawScorePN7Gdiplus8GraphicsEiii
 	.def	_Z9DrawScorePN7Gdiplus8GraphicsEiii;	.scl	2;	.type	32;	.endef
 	.seh_proc	_Z9DrawScorePN7Gdiplus8GraphicsEiii
 _Z9DrawScorePN7Gdiplus8GraphicsEiii:
 .LFB8697:
+	# --- PROLOGUE ---
 	push	rbp	 #
 	.seh_pushreg	rbp
 	mov	rbp, rsp	 #,
 	.seh_setframe	rbp, 0
-	sub	rsp, 80	 #,
+	sub	rsp, 80	 #                 ; 80 bytes: shadow(32) + locals(48)
 	.seh_stackalloc	80
 	.seh_endprologue
+	# Spill all 4 arguments to shadow space above rbp
 	mov	QWORD PTR 16[rbp], rcx	 # graphics, graphics
 	mov	DWORD PTR 24[rbp], edx	 # score, score
 	mov	DWORD PTR 32[rbp], r8d	 # centerX, centerX
 	mov	DWORD PTR 40[rbp], r9d	 # y, y
+
+	# --- STEP 1: sprintf(scoreStr, "%d", score) ---
+	# Convert integer score to decimal string in scoreStr[] at [rbp-48]
+	# __mingw_sprintf(rcx=scoreStr, rdx="%d", r8d=score)
  # src/render.c:116:     sprintf(scoreStr, "%d", score);
 	mov	ecx, DWORD PTR 24[rbp]	 # tmp115, score
-	lea	rdx, .LC15[rip]	 # tmp116,
-	lea	rax, -48[rbp]	 # tmp117,
-	mov	r8d, ecx	 #, tmp115
-	mov	rcx, rax	 #, tmp117
-	call	__mingw_sprintf	 #
+	lea	rdx, .LC15[rip]	 # tmp116,    ; rdx = &"%d"
+	lea	rax, -48[rbp]	 # tmp117,     ; rax = &scoreStr[0]
+	mov	r8d, ecx	 #, tmp115            ; r8d = score
+	mov	rcx, rax	 #, tmp117            ; rcx = &scoreStr
+	call	__mingw_sprintf	 #           ; fills scoreStr with "0","42","123"…
+
+	# --- STEP 2: len = strlen(scoreStr) ---
+	# Count how many digit characters the string has (1 digit for 0-9, 2 for 10-99…)
  # src/render.c:117:     int len = strlen(scoreStr);
-	lea	rax, -48[rbp]	 # tmp118,
-	mov	rcx, rax	 #, tmp118
-	call	strlen	 #
+	lea	rax, -48[rbp]	 # tmp118,     ; rax = &scoreStr[0]
+	mov	rcx, rax	 #, tmp118            ; rcx = &scoreStr
+	call	strlen	 #                   ; returns length in EAX
  # src/render.c:117:     int len = strlen(scoreStr);
-	mov	DWORD PTR -20[rbp], eax	 # len, _1
+	mov	DWORD PTR -20[rbp], eax	 # len, _1   ; store len at [rbp-20]
+
+	# --- PASS 1: MEASURE — totalWidth = 0; for(i=0;i<len;i++) totalWidth+=digit_width ---
  # src/render.c:119:     int totalWidth = 0;
-	mov	DWORD PTR -4[rbp], 0	 # totalWidth,
+	mov	DWORD PTR -4[rbp], 0	 # totalWidth,  ; initialize totalWidth = 0
  # src/render.c:120:     for (int i = 0; i < len; i++) {
-	mov	DWORD PTR -8[rbp], 0	 # i,
+	mov	DWORD PTR -8[rbp], 0	 # i,           ; i = 0 (measure loop counter)
  # src/render.c:120:     for (int i = 0; i < len; i++) {
-	jmp	.L158	 #
-.L160:
+	jmp	.L158	 #                   ; jump to loop condition first (do-while pattern)
+.L160:                                   # === MEASURE LOOP BODY ===
  # src/render.c:121:         int digit = scoreStr[i] - '0';
 	mov	eax, DWORD PTR -8[rbp]	 # tmp120, i
 	cdqe
@@ -2651,30 +3263,37 @@ _Z9DrawScorePN7Gdiplus8GraphicsEiii:
 	add	eax, edx	 # _7, totalWidth.41_6
 	mov	DWORD PTR -4[rbp], eax	 # totalWidth, _7
 .L159:
+	# --- MEASURE LOOP: increment i and check condition ---
  # src/render.c:120:     for (int i = 0; i < len; i++) {
-	add	DWORD PTR -8[rbp], 1	 # i,
-.L158:
+	add	DWORD PTR -8[rbp], 1	 # i,       ; i++
+.L158:                                   # === MEASURE LOOP CONDITION ===
  # src/render.c:120:     for (int i = 0; i < len; i++) {
 	mov	eax, DWORD PTR -8[rbp]	 # tmp130, i
-	cmp	eax, DWORD PTR -20[rbp]	 # tmp130, len
-	jl	.L160	 #,
+	cmp	eax, DWORD PTR -20[rbp]	 # tmp130, len  ; i < len?
+	jl	.L160	 #,                  ; yes → loop back to body
+
+	# --- CENTERING: x = centerX - totalWidth / 2 ---
+	# Implements signed division by 2 then negation using shift+bias trick.
+	# Equivalent C: x = centerX - (totalWidth >> 1)  (for non-negative totalWidth)
  # src/render.c:125:     int x = centerX - totalWidth / 2;
 	mov	eax, DWORD PTR -4[rbp]	 # tmp131, totalWidth
-	mov	edx, eax	 # tmp132, tmp131
-	shr	edx, 31	 # tmp132,
-	add	eax, edx	 # tmp133, tmp132
-	sar	eax	 # _8
-	neg	eax	 # _8
-	mov	edx, eax	 # _8, _8
+	mov	edx, eax	 # tmp132, tmp131   ; edx = totalWidth
+	shr	edx, 31	 # tmp132,           ; edx = sign bit (1 if negative)
+	add	eax, edx	 # tmp133, tmp132   ; bias for rounding toward zero
+	sar	eax	 # _8                    ; EAX = totalWidth / 2  (signed)
+	neg	eax	 # _8                    ; EAX = -(totalWidth / 2)
+	mov	edx, eax	 # _8, _8           ; EDX = -(totalWidth / 2)
  # src/render.c:125:     int x = centerX - totalWidth / 2;
 	mov	eax, DWORD PTR 32[rbp]	 # tmp138, centerX
-	add	eax, edx	 # x_34, _8
-	mov	DWORD PTR -12[rbp], eax	 # x, x_34
+	add	eax, edx	 # x_34, _8         ; x = centerX + (-(totalWidth/2))
+	mov	DWORD PTR -12[rbp], eax	 # x, x_34   ; store x at [rbp-12]
+
+	# --- PASS 2: DRAW — for(i=0;i<len;i++) draw digit sprite, advance x ---
  # src/render.c:126:     for (int i = 0; i < len; i++) {
-	mov	DWORD PTR -16[rbp], 0	 # i,
+	mov	DWORD PTR -16[rbp], 0	 # i,       ; i = 0 (draw loop counter)
  # src/render.c:126:     for (int i = 0; i < len; i++) {
-	jmp	.L161	 #
-.L163:
+	jmp	.L161	 #                   ; jump to condition first
+.L163:                                   # === DRAW LOOP BODY ===
  # src/render.c:127:         int digit = scoreStr[i] - '0';
 	mov	eax, DWORD PTR -16[rbp]	 # tmp140, i
 	cdqe
@@ -2718,122 +3337,258 @@ _Z9DrawScorePN7Gdiplus8GraphicsEiii:
 	mov	edx, DWORD PTR -12[rbp]	 # x.42_14, x
 	add	eax, edx	 # _15, x.42_14
 	mov	DWORD PTR -12[rbp], eax	 # x, _15
-.L162:
+.L162:                                   # === DRAW LOOP INCREMENT & CONDITION ===
+	# --- DRAW LOOP: increment i and check condition ---
  # src/render.c:126:     for (int i = 0; i < len; i++) {
-	add	DWORD PTR -16[rbp], 1	 # i,
+	add	DWORD PTR -16[rbp], 1	 # i,       ; i++
 .L161:
  # src/render.c:126:     for (int i = 0; i < len; i++) {
 	mov	eax, DWORD PTR -16[rbp]	 # tmp157, i
-	cmp	eax, DWORD PTR -20[rbp]	 # tmp157, len
-	jl	.L163	 #,
+	cmp	eax, DWORD PTR -20[rbp]	 # tmp157, len  ; i < len?
+	jl	.L163	 #,                  ; yes → loop back
+
+	# --- EPILOGUE ---
+	# All digit sprites drawn — clean up frame and return
  # src/render.c:133: }
 	nop	
 	nop	
-	add	rsp, 80	 #,
-	pop	rbp	 #
-	ret	
+	add	rsp, 80	 #,             ; deallocate 80-byte frame
+	pop	rbp	 #                 ; restore caller's frame pointer
+	ret	                            # return to DrawScore caller
 	.seh_endproc
+
+# ============================================================================
+# FUNCTION: DrawGame(HDC* hdc)  →  void
+# SOURCE:   src/render.c:135-217
+# MANGLED:  _Z8DrawGameP5HDC__
+#
+# PURPOSE: Master rendering function — draws ONE complete game frame.
+#          Called from WndProc every WM_PAINT (which fires after each WM_TIMER).
+#          Uses double-buffering: draws everything into hdcBackBuffer (off-screen),
+#          then copies the finished frame to the screen with a single BitBlt.
+#
+# ARGUMENT:
+#   RCX = hdc  — HDC* handle to the on-screen device context (window surface)
+#
+# RETURN VALUE: void
+#
+# STACK FRAME (sub rsp, 168  →  168 bytes):
+#   Note: rbp is offset from rsp:  lea rbp, 160[rsp]
+#         So  [rbp+N]  is ABOVE rbp (shadow space / args),
+#         and [rbp-N]  is BELOW rbp (locals within the 168-byte allocation).
+#
+#   [rbp+32]  = hdc           (spilled from RCX — 8 bytes, arg shadow)
+#   [rbp- 4]  = shakeX        (int — screen shake offset X, 0 if not shaking)
+#   [rbp- 8]  = shakeY        (int — screen shake offset Y, 0 if not shaking)
+#   [rbp-12]  = i             (int — pipe draw loop counter, 0..2)
+#   [rbp-16]  = x             (int — ground tile draw cursor)
+#   [rbp-20]  = pipeW         (int — pipe image width from GetWidth())
+#   [rbp-24]  = pipeH         (int — pipe image height from GetHeight())
+#   [rbp-28]  = pipeX         (int — screen X of pipe + shakeX)
+#   [rbp-32]  = topHeight     (int — game.pipes[i].topHeight)
+#   [rbp-36]  = bottomPipeY   (int — topHeight + PIPE_GAP + shakeY)
+#   [rbp-40]  = groundW       (int — ground image width)
+#   [rbp-44]  = groundH       (int — ground image height, unused in draw)
+#   [rbp-48]  = groundY       (int — WINDOW_HEIGHT - GROUND_HEIGHT = 608)
+#   [rbp-52]  = msgW          (int — "message" sprite width)
+#   [rbp-56]  = msgH          (int — "message" sprite height)
+#   [rbp-60]  = goW           (int — "gameover" sprite width)
+#   [rbp-80]  = graphics      (Gdiplus::Graphics object on stack, ~80 bytes)
+#               constructed with Graphics(hdcBackBuffer) — wraps back-buffer DC
+#
+#   RBX is pushed (callee-saved) to preserve across exception handler path.
+#
+# DRAW ORDER (layers, back to front — painter's algorithm):
+#   1. Background image  (full 1280x720, offset by shakeX/shakeY)
+#   2. Pipes (3 pairs): top pipe (rotated 180°), bottom pipe (normal)
+#   3. Ground tile (tiled horizontally, scrolls left via game.groundOffset)
+#   4. Bird sprite  (at BIRD_X=350, game.bird.y, current birdFrame)
+#   5. Particles   (DrawParticles — colored ellipses over bird)
+#   6. Score       (if started && !gameOver: DrawScore at top center)
+#   7. Message     (if !started: "get ready" message centered)
+#   8. Game Over   (if gameOver: "GAME OVER" banner + score)
+#   9. BitBlt      (copy back-buffer to screen — single atomic operation)
+#
+# PIPE ROTATION TRICK (top pipe drawn upside-down):
+#   GDI+ does not have a "flip vertically" mode.  Instead, the game uses:
+#     TranslateTransform(pipeCenterX, topHeight)  ← move origin to pipe tip
+#     RotateTransform(180)                         ← rotate 180 degrees
+#     DrawImage(pipeGreen, -pipeW/2, 0, pipeW, pipeH)
+#     ResetTransform()                             ← restore identity matrix
+#   Net effect: the pipe image is drawn flipped and positioned correctly.
+#   The coordinate of the BOTTOM of the top pipe is exactly topHeight.
+#
+# SCREEN SHAKE:
+#   If game.screenShake > 0, shakeX and shakeY are set to small random offsets.
+#   Every draw call that takes an (x, y) coordinate adds these offsets,
+#   making the entire scene jitter for a brief period after collision.
+#   Implemented as:
+#     shakeX = rand() % (game.screenShake * 2) - game.screenShake
+#     shakeY = rand() % (game.screenShake * 2) - game.screenShake
+#   Division via IDIV EBX (EBX = game.screenShake * 2, computed with LEA).
+#
+# GROUND SCROLLING:
+#   game.groundOffset (a float) is decremented each frame in UpdateGame.
+#   DrawGame casts it to INT and tiles the ground sprite starting from x=groundOffset,
+#   repeating until x >= WINDOW_WIDTH (1280).  The while loop uses:
+#     cmp [rbp-16], 1279 ; jle .L172   (loop while x <= 1279)
+#
+# C++ EXCEPTION HANDLING IN DrawGame:
+#   Gdiplus::Graphics is constructed on the stack at [rbp-80].
+#   If any GDI+ call between .LEHB9 and .LEHE10 throws a C++ exception,
+#   the SEH handler at .L179 destroys the Graphics object before re-throwing.
+#   Labels:
+#     .LEHB9 / .LEHE9   — exception region for Graphics constructor
+#     .LEHB10 / .LEHE10 — exception region for all draw calls
+#     .L179             — landing pad: calls Graphics::~Graphics then Unwind_Resume
+#   The .LLSDA8698 table at the end of the function maps instruction ranges
+#   to these cleanup handlers (Language Specific Data Area).
+#
+# GAME STATE OFFSETS in the game struct (accessed via .refptr.game):
+#   game.bird.y        at offset  0  (float, 4 bytes)
+#   game.score         at offset 52  (int)
+#   game.gameOver      at offset 60  (int / bool)
+#   game.started       at offset 64  (int / bool)
+#   game.groundOffset  at offset 80  (float)
+#   game.screenShake   at offset 84  (int)
+#   game.birdFrame     at offset 92  (int)
+#   game.pipes[i].x    at offset 16 + i*12  (Pipe struct = 12 bytes: x,topHeight,passed)
+#   game.pipes[i].topHeight at offset 20 + i*12
+# ============================================================================
 	.globl	_Z8DrawGameP5HDC__
 	.def	_Z8DrawGameP5HDC__;	.scl	2;	.type	32;	.endef
 	.seh_proc	_Z8DrawGameP5HDC__
 _Z8DrawGameP5HDC__:
 .LFB8698:
+	# --- PROLOGUE ---
+	# RBP is pushed first, then RBX (needed to preserve across exception handler).
+	# Sub 168 allocates the frame.  rbp = rsp+160 (offset to keep local vars negative).
 	push	rbp	 #
 	.seh_pushreg	rbp
-	push	rbx	 #
+	push	rbx	 #                 ; RBX is callee-saved — used in screen shake div
 	.seh_pushreg	rbx
-	sub	rsp, 168	 #,
+	sub	rsp, 168	 #,             ; 168 = shadow(32) + locals(128) + alignment(8)
 	.seh_stackalloc	168
-	lea	rbp, 160[rsp]	 #,
+	lea	rbp, 160[rsp]	 #,         ; rbp = rsp+160 → locals are [rbp-N]
 	.seh_setframe	rbp, 160
 	.seh_endprologue
-	mov	QWORD PTR 32[rbp], rcx	 # hdc, hdc
+	mov	QWORD PTR 32[rbp], rcx	 # hdc, hdc   ; spill hdc argument
+
+	# --- STEP 1: Construct Graphics object on stack, set interpolation mode ---
+	# Graphics::Graphics(HDC*) creates a GDI+ drawing context wrapping the back-buffer DC.
+	# InterpolationModeNearestNeighbor (5) = pixel-perfect scaling, no bilinear blur.
+	# The .LEHB9/.LEHE9 markers define the exception region for the constructor call
+	# — if it throws, the SEH handler will know to skip destructor (not constructed yet).
  # src/render.c:136:     Graphics graphics(hdcBackBuffer);
 	mov	rdx, QWORD PTR hdcBackBuffer[rip]	 # hdcBackBuffer.44_1, hdcBackBuffer
-	lea	rax, -80[rbp]	 # tmp169,
-	mov	rcx, rax	 #, tmp169
-.LEHB9:
-	call	_ZN7Gdiplus8GraphicsC1EP5HDC__	 #
-.LEHE9:
+	lea	rax, -80[rbp]	 # tmp169,     ; rax = &graphics (stack space at [rbp-80])
+	mov	rcx, rax	 #, tmp169        ; rcx = this pointer
+.LEHB9:                                  # BEGIN exception region (constructor)
+	call	_ZN7Gdiplus8GraphicsC1EP5HDC__	 # Graphics::Graphics(hdcBackBuffer)
+.LEHE9:                                  # END exception region (constructor)
  # src/render.c:137:     graphics.SetInterpolationMode(InterpolationModeNearestNeighbor);
-	lea	rax, -80[rbp]	 # tmp170,
-	mov	edx, 5	 #,
-	mov	rcx, rax	 #, tmp170
-.LEHB10:
+	lea	rax, -80[rbp]	 # tmp170,     ; rax = &graphics
+	mov	edx, 5	 #,                   ; edx = InterpolationModeNearestNeighbor = 5
+	mov	rcx, rax	 #, tmp170        ; rcx = this
+.LEHB10:                                 # BEGIN exception region (all draw calls)
 	call	_ZN7Gdiplus8Graphics20SetInterpolationModeENS_17InterpolationModeE	 #
+
+	# --- STEP 2: Screen Shake — compute shakeX, shakeY random offsets ---
+	# shakeX = shakeY = 0 always; only overwritten if game.screenShake > 0.
+	# game.screenShake decrements each frame in UpdateGame until it reaches 0.
  # src/render.c:139:     int shakeX = 0, shakeY = 0;
-	mov	DWORD PTR -4[rbp], 0	 # shakeX,
+	mov	DWORD PTR -4[rbp], 0	 # shakeX,   ; default: no shake
  # src/render.c:139:     int shakeX = 0, shakeY = 0;
 	mov	DWORD PTR -8[rbp], 0	 # shakeY,
  # src/render.c:140:     if (game.screenShake > 0) {
-	mov	rax, QWORD PTR .refptr.game[rip]	 # tmp171,
-	mov	eax, DWORD PTR 84[rax]	 # _2, game.screenShake
+	mov	rax, QWORD PTR .refptr.game[rip]	 # ; rax = &game struct
+	mov	eax, DWORD PTR 84[rax]	 # _2, game.screenShake   ; load screenShake field
  # src/render.c:140:     if (game.screenShake > 0) {
-	test	eax, eax	 # _2
-	jle	.L165	 #,
+	test	eax, eax	 # _2                             ; is screenShake > 0?
+	jle	.L165	 #,                                   ; no → skip shake
+
+	# --- shakeX = rand() % (screenShake*2) - screenShake ---
+	# EBX = screenShake * 2  (via LEA [rdx+rdx])
+	# IDIV EBX uses signed division; EDX gets the remainder (= rand() % range)
  # src/render.c:141:         shakeX = (rand() % (game.screenShake * 2)) - game.screenShake;
-	call	rand	 #
+	call	rand	 #                                    ; EAX = random int
  # src/render.c:141:         shakeX = (rand() % (game.screenShake * 2)) - game.screenShake;
-	mov	rdx, QWORD PTR .refptr.game[rip]	 # tmp172,
+	mov	rdx, QWORD PTR .refptr.game[rip]	 #
 	mov	edx, DWORD PTR 84[rdx]	 # _4, game.screenShake
  # src/render.c:141:         shakeX = (rand() % (game.screenShake * 2)) - game.screenShake;
-	lea	ebx, [rdx+rdx]	 # _5,
+	lea	ebx, [rdx+rdx]	 # _5,            ; ebx = screenShake * 2
  # src/render.c:141:         shakeX = (rand() % (game.screenShake * 2)) - game.screenShake;
-	cdq
-	idiv	ebx	 # _5
-	mov	ecx, edx	 # _6, _6
-	mov	edx, ecx	 # _6, _6
+	cdq                                        # sign-extend EAX → EDX:EAX for IDIV
+	idiv	ebx	 # _5                          ; EDX = EAX % EBX (remainder)
+	mov	ecx, edx	 # _6, _6              ; ecx = remainder
+	mov	edx, ecx	 # _6, _6              ; edx = remainder (redundant at -O0)
  # src/render.c:141:         shakeX = (rand() % (game.screenShake * 2)) - game.screenShake;
-	mov	rax, QWORD PTR .refptr.game[rip]	 # tmp175,
+	mov	rax, QWORD PTR .refptr.game[rip]	 #
 	mov	eax, DWORD PTR 84[rax]	 # _7, game.screenShake
  # src/render.c:141:         shakeX = (rand() % (game.screenShake * 2)) - game.screenShake;
-	sub	edx, eax	 # tmp176, _7
-	mov	DWORD PTR -4[rbp], edx	 # shakeX, tmp176
+	sub	edx, eax	 # tmp176, _7          ; edx = remainder - screenShake
+	mov	DWORD PTR -4[rbp], edx	 # shakeX, tmp176   ; store shakeX
+
+	# --- shakeY = rand() % (screenShake*2) - screenShake  (same pattern) ---
  # src/render.c:142:         shakeY = (rand() % (game.screenShake * 2)) - game.screenShake;
 	call	rand	 #
  # src/render.c:142:         shakeY = (rand() % (game.screenShake * 2)) - game.screenShake;
-	mov	rdx, QWORD PTR .refptr.game[rip]	 # tmp177,
+	mov	rdx, QWORD PTR .refptr.game[rip]	 #
 	mov	edx, DWORD PTR 84[rdx]	 # _9, game.screenShake
  # src/render.c:142:         shakeY = (rand() % (game.screenShake * 2)) - game.screenShake;
-	lea	ebx, [rdx+rdx]	 # _10,
+	lea	ebx, [rdx+rdx]	 # _10,           ; ebx = screenShake * 2
  # src/render.c:142:         shakeY = (rand() % (game.screenShake * 2)) - game.screenShake;
 	cdq
-	idiv	ebx	 # _10
+	idiv	ebx	 # _10                         ; EDX = rand() % range
 	mov	ecx, edx	 # _11, _11
 	mov	edx, ecx	 # _11, _11
  # src/render.c:142:         shakeY = (rand() % (game.screenShake * 2)) - game.screenShake;
-	mov	rax, QWORD PTR .refptr.game[rip]	 # tmp180,
+	mov	rax, QWORD PTR .refptr.game[rip]	 #
 	mov	eax, DWORD PTR 84[rax]	 # _12, game.screenShake
  # src/render.c:142:         shakeY = (rand() % (game.screenShake * 2)) - game.screenShake;
 	sub	edx, eax	 # tmp181, _12
 	mov	DWORD PTR -8[rbp], edx	 # shakeY, tmp181
+
+	# ===================================================================
+	# LAYER 1: BACKGROUND
+	# ===================================================================
 .L165:
  # src/render.c:146:     if (imgBackground) {
 	mov	rax, QWORD PTR imgBackground[rip]	 # imgBackground.45_13, imgBackground
  # src/render.c:146:     if (imgBackground) {
-	test	rax, rax	 # imgBackground.45_13
-	je	.L166	 #,
+	test	rax, rax	 # imgBackground.45_13     ; is imgBackground loaded?
+	je	.L166	 #,                               ; no → skip background draw
+
+	# graphics.DrawImage(imgBackground, shakeX, shakeY, WINDOW_WIDTH, WINDOW_HEIGHT)
+	# 5-argument DrawImage: draws image scaled to fit the specified rectangle.
+	# Win64: first 4 args in RCX,RDX,R8,R9; 5th and 6th go on stack at [rsp+32],[rsp+40]
  # src/render.c:147:         graphics.DrawImage(imgBackground, shakeX, shakeY, (INT)WINDOW_WIDTH, (INT)WINDOW_HEIGHT);
-	mov	rdx, QWORD PTR imgBackground[rip]	 # imgBackground.46_14, imgBackground
-	mov	r8d, DWORD PTR -8[rbp]	 # tmp182, shakeY
+	mov	rdx, QWORD PTR imgBackground[rip]	 # ; rdx = imgBackground (Image* arg2)
+	mov	r8d, DWORD PTR -8[rbp]	 # tmp182, shakeY   ; r8d = shakeY (x arg3 = shakeX, see below)
 	mov	ecx, DWORD PTR -4[rbp]	 # tmp183, shakeX
-	lea	rax, -80[rbp]	 # tmp184,
-	mov	DWORD PTR 40[rsp], 720	 #,
-	mov	DWORD PTR 32[rsp], 1280	 #,
-	mov	r9d, r8d	 #, tmp182
-	mov	r8d, ecx	 #, tmp183
-	mov	rcx, rax	 #, tmp184
-	call	_ZN7Gdiplus8Graphics9DrawImageEPNS_5ImageEiiii	 #
+	lea	rax, -80[rbp]	 # tmp184,             ; rax = &graphics (this)
+	mov	DWORD PTR 40[rsp], 720	 #,            ; [rsp+40] = height = 720 (arg6 on stack)
+	mov	DWORD PTR 32[rsp], 1280	 #,           ; [rsp+32] = width  = 1280 (arg5 on stack)
+	mov	r9d, r8d	 #, tmp182                 ; r9d = shakeY (y, arg4)
+	mov	r8d, ecx	 #, tmp183                 ; r8d = shakeX (x, arg3)
+	mov	rcx, rax	 #, tmp184                 ; rcx = &graphics (this, arg1)
+	call	_ZN7Gdiplus8Graphics9DrawImageEPNS_5ImageEiiii	 # DrawImage(img,x,y,w,h)
+
+	# ===================================================================
+	# LAYER 2: PIPES (3 pairs — top pipe rotated 180°, bottom pipe upright)
+	# ===================================================================
 .L166:
  # src/render.c:151:     if (imgPipeGreen) {
 	mov	rax, QWORD PTR imgPipeGreen[rip]	 # imgPipeGreen.47_15, imgPipeGreen
  # src/render.c:151:     if (imgPipeGreen) {
-	test	rax, rax	 # imgPipeGreen.47_15
-	je	.L167	 #,
+	test	rax, rax	 # imgPipeGreen.47_15     ; is pipe image loaded?
+	je	.L167	 #,                               ; no → skip all pipe drawing
+
+	# Pre-compute pipe image dimensions (same for all 3 pipes)
  # src/render.c:152:         INT pipeW = (INT)imgPipeGreen->GetWidth();
 	mov	rax, QWORD PTR imgPipeGreen[rip]	 # imgPipeGreen.48_16, imgPipeGreen
 	mov	rcx, rax	 #, imgPipeGreen.48_16
-	call	_ZN7Gdiplus5Image8GetWidthEv	 #
+	call	_ZN7Gdiplus5Image8GetWidthEv	 # → pipeW in EAX
  # src/render.c:152:         INT pipeW = (INT)imgPipeGreen->GetWidth();
 	mov	DWORD PTR -20[rbp], eax	 # pipeW, _17
  # src/render.c:153:         INT pipeH = (INT)imgPipeGreen->GetHeight();
@@ -2842,515 +3597,773 @@ _Z8DrawGameP5HDC__:
 	call	_ZN7Gdiplus5Image9GetHeightEv	 #
  # src/render.c:153:         INT pipeH = (INT)imgPipeGreen->GetHeight();
 	mov	DWORD PTR -24[rbp], eax	 # pipeH, _19
+	# Start pipe for-loop: i = 0, 1, 2
  # src/render.c:155:         for (int i = 0; i < 3; i++) {
-	mov	DWORD PTR -12[rbp], 0	 # i,
+	mov	DWORD PTR -12[rbp], 0	 # i,            ; i = 0
  # src/render.c:155:         for (int i = 0; i < 3; i++) {
-	jmp	.L168	 #
-.L169:
+	jmp	.L168	 #                   ; jump to condition check
+.L169:                                   # === PIPE LOOP BODY (runs 3 times) ===
+
+	# --- Load game.pipes[i].x ---
+	# Pipe struct = 12 bytes: {int x, int topHeight, int passed} → each field 4 bytes
+	# Offset of pipes[i].x  = base_of_pipes + i*12 + 0  = game+16 + i*12
+	# i*12 computed as: rdx=i; rax=rdx; rax+=rax(=2i); rax+=rdx(=3i); rax<<=2(=12i)
  # src/render.c:156:             INT pipeX = game.pipes[i].x + shakeX;
-	mov	rcx, QWORD PTR .refptr.game[rip]	 # tmp185,
-	mov	eax, DWORD PTR -12[rbp]	 # tmp187, i
-	movsx	rdx, eax	 # tmp186, tmp187
-	mov	rax, rdx	 # tmp188, tmp186
-	add	rax, rax	 # tmp188
-	add	rax, rdx	 # tmp188, tmp186
-	sal	rax, 2	 # tmp189,
-	add	rax, rcx	 # tmp190, tmp185
-	add	rax, 16	 # tmp191,
-	mov	edx, DWORD PTR [rax]	 # _20, game.pipes[i_73].x
+	mov	rcx, QWORD PTR .refptr.game[rip]	 # ; rcx = &game
+	mov	eax, DWORD PTR -12[rbp]	 # tmp187, i    ; eax = i
+	movsx	rdx, eax	 # ; rdx = i (sign-extended)
+	mov	rax, rdx	 # ; rax = i
+	add	rax, rax	 # ; rax = 2i
+	add	rax, rdx	 # ; rax = 3i
+	sal	rax, 2	 # ; rax = 12i  (Pipe struct is 12 bytes)
+	add	rax, rcx	 # ; rax = &game + 12i
+	add	rax, 16	 # ; rax = &game.pipes[i]  (pipes starts at offset 16 in game struct)
+	mov	edx, DWORD PTR [rax]	 # _20, game.pipes[i_73].x  ; edx = pipes[i].x
  # src/render.c:156:             INT pipeX = game.pipes[i].x + shakeX;
 	mov	eax, DWORD PTR -4[rbp]	 # tmp195, shakeX
-	add	eax, edx	 # pipeX_105, _20
-	mov	DWORD PTR -28[rbp], eax	 # pipeX, pipeX_105
+	add	eax, edx	 # ; eax = pipes[i].x + shakeX
+	mov	DWORD PTR -28[rbp], eax	 # pipeX    ; store pipeX at [rbp-28]
+
+	# --- Load game.pipes[i].topHeight --- (same indexing, offset +20 = +16 + 4)
  # src/render.c:157:             INT topHeight = game.pipes[i].topHeight;
-	mov	rcx, QWORD PTR .refptr.game[rip]	 # tmp196,
+	mov	rcx, QWORD PTR .refptr.game[rip]	 #
 	mov	eax, DWORD PTR -12[rbp]	 # tmp198, i
-	movsx	rdx, eax	 # tmp197, tmp198
-	mov	rax, rdx	 # tmp199, tmp197
-	add	rax, rax	 # tmp199
-	add	rax, rdx	 # tmp199, tmp197
-	sal	rax, 2	 # tmp200,
-	add	rax, rcx	 # tmp201, tmp196
-	add	rax, 20	 # tmp202,
+	movsx	rdx, eax	 # ; rdx = i
+	mov	rax, rdx	 #
+	add	rax, rax	 # ; 2i
+	add	rax, rdx	 # ; 3i
+	sal	rax, 2	 # ; 12i
+	add	rax, rcx	 # ; &game + 12i
+	add	rax, 20	 # ; &game.pipes[i].topHeight  (offset 16 for pipes base + 4 for .topHeight)
 	mov	eax, DWORD PTR [rax]	 # tmp203, game.pipes[i_73].topHeight
-	mov	DWORD PTR -32[rbp], eax	 # topHeight, tmp203
+	mov	DWORD PTR -32[rbp], eax	 # topHeight
+
+	# --- TOP PIPE: draw pipe image rotated 180° (upside-down) ---
+	# Strategy: use GDI+ transform to flip the pipe without a separate flipped sprite.
+	#   Step A: TranslateTransform(pipeX + pipeW/2, topHeight + shakeY)
+	#           → move the drawing origin to the center-bottom of where the top pipe tip goes
+	#   Step B: RotateTransform(180)
+	#           → rotate all subsequent drawing by 180 degrees around the new origin
+	#   Step C: DrawImage(pipeGreen, -pipeW/2, 0, pipeW, pipeH)
+	#           → draw pipe starting left of origin; combined with 180° rotation this flips it
+	#   Step D: ResetTransform()
+	#           → restore identity transform for subsequent drawing
+
+	# Step A: Convert integer coords to float (REAL) for TranslateTransform
+	#   Y argument: topHeight + shakeY → convert to float via cvtsi2ss → XMM1
+	#   X argument: pipeX + pipeW/2   → convert to float via cvtsi2ss → XMM0
+	#   TranslateTransform(REAL x, REAL y, MatrixOrder=0) takes float args in XMM1,XMM2
+	#   (Win64 floating-point args: XMM1=arg2, XMM2=arg3 after rcx=this)
  # src/render.c:160:             graphics.TranslateTransform((REAL)(pipeX + pipeW/2), (REAL)(topHeight + shakeY));
-	mov	edx, DWORD PTR -32[rbp]	 # tmp204, topHeight
-	mov	eax, DWORD PTR -8[rbp]	 # tmp205, shakeY
-	add	eax, edx	 # _21, tmp204
+	mov	edx, DWORD PTR -32[rbp]	 # ; edx = topHeight
+	mov	eax, DWORD PTR -8[rbp]	 # ; eax = shakeY
+	add	eax, edx	 # ; eax = topHeight + shakeY
  # src/render.c:160:             graphics.TranslateTransform((REAL)(pipeX + pipeW/2), (REAL)(topHeight + shakeY));
-	pxor	xmm1, xmm1	 # _22
-	cvtsi2ss	xmm1, eax	 # _22, _21
+	pxor	xmm1, xmm1	 #            ; clear XMM1 (to avoid stale NaN/denormal bits)
+	cvtsi2ss	xmm1, eax	 # ; XMM1 = (float)(topHeight + shakeY)  — Y arg
  # src/render.c:160:             graphics.TranslateTransform((REAL)(pipeX + pipeW/2), (REAL)(topHeight + shakeY));
-	mov	eax, DWORD PTR -20[rbp]	 # tmp206, pipeW
-	mov	edx, eax	 # tmp207, tmp206
-	shr	edx, 31	 # tmp207,
-	add	eax, edx	 # tmp208, tmp207
-	sar	eax	 # _23
-	mov	edx, eax	 # _23, _23
+	mov	eax, DWORD PTR -20[rbp]	 # ; eax = pipeW
+	mov	edx, eax	 #
+	shr	edx, 31	 #                 ; sign bit (for signed div by 2)
+	add	eax, edx	 #                ; bias for rounding
+	sar	eax	 #                     ; eax = pipeW / 2
+	mov	edx, eax	 # ; edx = pipeW/2
  # src/render.c:160:             graphics.TranslateTransform((REAL)(pipeX + pipeW/2), (REAL)(topHeight + shakeY));
-	mov	eax, DWORD PTR -28[rbp]	 # tmp210, pipeX
-	add	eax, edx	 # _24, _23
+	mov	eax, DWORD PTR -28[rbp]	 # ; eax = pipeX
+	add	eax, edx	 # ; eax = pipeX + pipeW/2
  # src/render.c:160:             graphics.TranslateTransform((REAL)(pipeX + pipeW/2), (REAL)(topHeight + shakeY));
-	pxor	xmm0, xmm0	 # _25
-	cvtsi2ss	xmm0, eax	 # _25, _24
-	lea	rax, -80[rbp]	 # tmp211,
-	mov	r9d, 0	 #,
-	movaps	xmm2, xmm1	 #, _22
-	movaps	xmm1, xmm0	 #, _25
-	mov	rcx, rax	 #, tmp211
-	call	_ZN7Gdiplus8Graphics18TranslateTransformEffNS_11MatrixOrderE	 #
+	pxor	xmm0, xmm0	 #            ; clear XMM0
+	cvtsi2ss	xmm0, eax	 # ; XMM0 = (float)(pipeX + pipeW/2) — X arg
+	lea	rax, -80[rbp]	 # ; rax = &graphics (this)
+	mov	r9d, 0	 #,                ; r9d = MatrixOrder::MatrixOrderPrepend = 0
+	movaps	xmm2, xmm1	 #        ; xmm2 = Y (3rd float arg → XMM2 in Win64 ABI)
+	movaps	xmm1, xmm0	 #        ; xmm1 = X (2nd float arg → XMM1)
+	mov	rcx, rax	 #            ; rcx = this (arg1)
+	call	_ZN7Gdiplus8Graphics18TranslateTransformEffNS_11MatrixOrderE	 # TranslateTransform(x,y,order)
+
+	# Step B: RotateTransform(180.0f, MatrixOrderPrepend)
+	# .LC16 = 1127481344 = 0x43340000 = 180.0f in IEEE 754 single precision
  # src/render.c:161:             graphics.RotateTransform(180);
-	lea	rax, -80[rbp]	 # tmp212,
-	mov	r8d, 0	 #,
-	movss	xmm1, DWORD PTR .LC16[rip]	 #,
-	mov	rcx, rax	 #, tmp212
-	call	_ZN7Gdiplus8Graphics15RotateTransformEfNS_11MatrixOrderE	 #
+	lea	rax, -80[rbp]	 # ; &graphics
+	mov	r8d, 0	 #,                ; r8d = MatrixOrder = 0 (Prepend)
+	movss	xmm1, DWORD PTR .LC16[rip]	 # ; xmm1 = 180.0f  (angle arg)
+	mov	rcx, rax	 #            ; rcx = this
+	call	_ZN7Gdiplus8Graphics15RotateTransformEfNS_11MatrixOrderE	 # RotateTransform(180.0f, 0)
+
+	# Step C: DrawImage(pipeGreen, -(pipeW/2), 0, pipeW, pipeH)
+	# X = -(pipeW/2) places the pipe left of origin so rotation centers it
+	# Y = 0 because origin is already at the pipe tip after TranslateTransform
  # src/render.c:162:             graphics.DrawImage(imgPipeGreen, -(pipeW/2), 0, pipeW, pipeH);
-	mov	eax, DWORD PTR -20[rbp]	 # tmp213, pipeW
-	mov	edx, eax	 # tmp214, tmp213
-	shr	edx, 31	 # tmp214,
-	add	eax, edx	 # tmp215, tmp214
-	sar	eax	 # _26
-	neg	eax	 # _26
-	mov	r8d, eax	 # _26, _26
-	mov	rdx, QWORD PTR imgPipeGreen[rip]	 # imgPipeGreen.50_27, imgPipeGreen
-	lea	rax, -80[rbp]	 # tmp217,
-	mov	ecx, DWORD PTR -24[rbp]	 # tmp218, pipeH
-	mov	DWORD PTR 40[rsp], ecx	 #, tmp218
-	mov	ecx, DWORD PTR -20[rbp]	 # tmp219, pipeW
-	mov	DWORD PTR 32[rsp], ecx	 #, tmp219
-	mov	r9d, 0	 #,
-	mov	rcx, rax	 #, tmp217
-	call	_ZN7Gdiplus8Graphics9DrawImageEPNS_5ImageEiiii	 #
+	mov	eax, DWORD PTR -20[rbp]	 # ; eax = pipeW
+	mov	edx, eax	 #
+	shr	edx, 31	 #
+	add	eax, edx	 #
+	sar	eax	 #                     ; eax = pipeW/2
+	neg	eax	 # ; eax = -(pipeW/2)  ← negative X offset
+	mov	r8d, eax	 #             ; r8d = -(pipeW/2)  (arg3 = x)
+	mov	rdx, QWORD PTR imgPipeGreen[rip]	 # ; rdx = imgPipeGreen (arg2)
+	lea	rax, -80[rbp]	 #         ; rax = &graphics
+	mov	ecx, DWORD PTR -24[rbp]	 # ; ecx = pipeH
+	mov	DWORD PTR 40[rsp], ecx	 # ; [rsp+40] = pipeH (arg6, on stack)
+	mov	ecx, DWORD PTR -20[rbp]	 # ; ecx = pipeW
+	mov	DWORD PTR 32[rsp], ecx	 # ; [rsp+32] = pipeW (arg5, on stack)
+	mov	r9d, 0	 #,                ; r9d = y = 0 (arg4)
+	mov	rcx, rax	 #             ; rcx = &graphics (this, arg1)
+	call	_ZN7Gdiplus8Graphics9DrawImageEPNS_5ImageEiiii	 # DrawImage(img, x, y, w, h)
+
+	# Step D: ResetTransform() — restore identity matrix for next draw
  # src/render.c:163:             graphics.ResetTransform();
-	lea	rax, -80[rbp]	 # tmp220,
-	mov	rcx, rax	 #, tmp220
-	call	_ZN7Gdiplus8Graphics14ResetTransformEv	 #
+	lea	rax, -80[rbp]	 #         ; rax = &graphics
+	mov	rcx, rax	 #
+	call	_ZN7Gdiplus8Graphics14ResetTransformEv	 # ResetTransform()
+
+	# --- BOTTOM PIPE: draw upright at bottomPipeY = topHeight + PIPE_GAP + shakeY ---
+	# PIPE_GAP = 200 pixels — the gap between top and bottom pipe
+	# lea edx, 200[rax] is GCC's idiom for edx = rax + 200 (topHeight + PIPE_GAP)
  # src/render.c:166:             INT bottomPipeY = topHeight + PIPE_GAP + shakeY;
-	mov	eax, DWORD PTR -32[rbp]	 # tmp221, topHeight
-	lea	edx, 200[rax]	 # _28,
+	mov	eax, DWORD PTR -32[rbp]	 # ; eax = topHeight
+	lea	edx, 200[rax]	 # ; edx = topHeight + 200 (PIPE_GAP = 200)
  # src/render.c:166:             INT bottomPipeY = topHeight + PIPE_GAP + shakeY;
-	mov	eax, DWORD PTR -8[rbp]	 # tmp225, shakeY
-	add	eax, edx	 # bottomPipeY_111, _28
-	mov	DWORD PTR -36[rbp], eax	 # bottomPipeY, bottomPipeY_111
+	mov	eax, DWORD PTR -8[rbp]	 # ; eax = shakeY
+	add	eax, edx	 # ; eax = topHeight + 200 + shakeY
+	mov	DWORD PTR -36[rbp], eax	 # bottomPipeY
  # src/render.c:167:             graphics.DrawImage(imgPipeGreen, pipeX, bottomPipeY, pipeW, pipeH);
 	mov	rdx, QWORD PTR imgPipeGreen[rip]	 # imgPipeGreen.51_29, imgPipeGreen
 	mov	r9d, DWORD PTR -36[rbp]	 # tmp226, bottomPipeY
 	mov	r8d, DWORD PTR -28[rbp]	 # tmp227, pipeX
-	lea	rax, -80[rbp]	 # tmp228,
-	mov	ecx, DWORD PTR -24[rbp]	 # tmp229, pipeH
-	mov	DWORD PTR 40[rsp], ecx	 #, tmp229
-	mov	ecx, DWORD PTR -20[rbp]	 # tmp230, pipeW
-	mov	DWORD PTR 32[rsp], ecx	 #, tmp230
-	mov	rcx, rax	 #, tmp228
-	call	_ZN7Gdiplus8Graphics9DrawImageEPNS_5ImageEiiii	 #
+	lea	rax, -80[rbp]	 #             ; rax = &graphics (this)
+	mov	ecx, DWORD PTR -24[rbp]	 # ; ecx = pipeH (arg6)
+	mov	DWORD PTR 40[rsp], ecx	 # ; [rsp+40] = pipeH
+	mov	ecx, DWORD PTR -20[rbp]	 # ; ecx = pipeW (arg5)
+	mov	DWORD PTR 32[rsp], ecx	 # ; [rsp+32] = pipeW
+	mov	rcx, rax	 #             ; rcx = this (arg1)
+	call	_ZN7Gdiplus8Graphics9DrawImageEPNS_5ImageEiiii	 # DrawImage(img,pipeX,bottomPipeY,pipeW,pipeH)
+
+	# --- Pipe loop: i++ and check i <= 2 ---
  # src/render.c:155:         for (int i = 0; i < 3; i++) {
-	add	DWORD PTR -12[rbp], 1	 # i,
-.L168:
+	add	DWORD PTR -12[rbp], 1	 # i,            ; i++
+.L168:                                   # === PIPE LOOP CONDITION ===
  # src/render.c:155:         for (int i = 0; i < 3; i++) {
-	cmp	DWORD PTR -12[rbp], 2	 # i,
-	jle	.L169	 #,
+	cmp	DWORD PTR -12[rbp], 2	 # i,            ; i <= 2 (i.e. i < 3)?
+	jle	.L169	 #,                  ; yes → draw next pipe
+
+	# ===================================================================
+	# LAYER 3: GROUND (tiled horizontally, scrolling left)
+	# ===================================================================
 .L167:
  # src/render.c:172:     if (imgGround) {
 	mov	rax, QWORD PTR imgGround[rip]	 # imgGround.52_30, imgGround
  # src/render.c:172:     if (imgGround) {
-	test	rax, rax	 # imgGround.52_30
-	je	.L170	 #,
+	test	rax, rax	 #                ; is imgGround loaded?
+	je	.L170	 #,                   ; no → skip ground draw
+
+	# Get ground image dimensions (sprite is narrower than the screen, so must tile it)
  # src/render.c:173:         INT groundW = (INT)imgGround->GetWidth();
-	mov	rax, QWORD PTR imgGround[rip]	 # imgGround.53_31, imgGround
-	mov	rcx, rax	 #, imgGround.53_31
-	call	_ZN7Gdiplus5Image8GetWidthEv	 #
+	mov	rax, QWORD PTR imgGround[rip]	 #
+	mov	rcx, rax	 #
+	call	_ZN7Gdiplus5Image8GetWidthEv	 # → groundW in EAX
  # src/render.c:173:         INT groundW = (INT)imgGround->GetWidth();
-	mov	DWORD PTR -40[rbp], eax	 # groundW, _32
+	mov	DWORD PTR -40[rbp], eax	 # groundW
  # src/render.c:174:         INT groundH = (INT)imgGround->GetHeight();
-	mov	rax, QWORD PTR imgGround[rip]	 # imgGround.54_33, imgGround
-	mov	rcx, rax	 #, imgGround.54_33
-	call	_ZN7Gdiplus5Image9GetHeightEv	 #
+	mov	rax, QWORD PTR imgGround[rip]	 #
+	mov	rcx, rax	 #
+	call	_ZN7Gdiplus5Image9GetHeightEv	 # → groundH in EAX (loaded but not used directly)
  # src/render.c:174:         INT groundH = (INT)imgGround->GetHeight();
-	mov	DWORD PTR -44[rbp], eax	 # groundH, _34
+	mov	DWORD PTR -44[rbp], eax	 # groundH
+
+	# groundY = 608 = WINDOW_HEIGHT(720) - GROUND_HEIGHT(112) — fixed Y position
  # src/render.c:175:         INT groundY = WINDOW_HEIGHT - GROUND_HEIGHT;
-	mov	DWORD PTR -48[rbp], 608	 # groundY,
+	mov	DWORD PTR -48[rbp], 608	 # groundY,  ; compile-time constant
+
+	# Starting X: cast game.groundOffset (float) to int, add shakeX
+	# game.groundOffset is a float at game+80, decremented each frame in UpdateGame
+	# cvttss2si = convert scalar single-precision to signed int (truncate toward zero)
  # src/render.c:177:         INT x = (INT)game.groundOffset + shakeX;
-	mov	rax, QWORD PTR .refptr.game[rip]	 # tmp231,
-	movss	xmm0, DWORD PTR 80[rax]	 # _35, game.groundOffset
+	mov	rax, QWORD PTR .refptr.game[rip]	 #
+	movss	xmm0, DWORD PTR 80[rax]	 # ; xmm0 = game.groundOffset (float)
  # src/render.c:177:         INT x = (INT)game.groundOffset + shakeX;
-	cvttss2si	edx, xmm0	 # _36, _35
+	cvttss2si	edx, xmm0	 # ; edx = (INT)groundOffset  (truncate float→int)
  # src/render.c:177:         INT x = (INT)game.groundOffset + shakeX;
-	mov	eax, DWORD PTR -4[rbp]	 # tmp235, shakeX
-	add	eax, edx	 # x_121, _36
-	mov	DWORD PTR -16[rbp], eax	 # x, x_121
+	mov	eax, DWORD PTR -4[rbp]	 # ; eax = shakeX
+	add	eax, edx	 # ; eax = (int)groundOffset + shakeX
+	mov	DWORD PTR -16[rbp], eax	 # x
+
+	# Tile the ground: while (x < 1280) { DrawImage(ground, x, groundY+shakeY); x += groundW; }
+	# cmp x, 1279 ; jle = "if x <= 1279 continue" which is same as "while x < 1280"
  # src/render.c:178:         while (x < WINDOW_WIDTH) {
-	jmp	.L171	 #
-.L172:
+	jmp	.L171	 #                   ; jump to condition first
+.L172:                                   # === GROUND TILE DRAW ===
  # src/render.c:179:             graphics.DrawImage(imgGround, x, groundY + shakeY);
-	mov	edx, DWORD PTR -48[rbp]	 # tmp236, groundY
-	mov	eax, DWORD PTR -8[rbp]	 # tmp237, shakeY
-	lea	r8d, [rdx+rax]	 # _37,
-	mov	rdx, QWORD PTR imgGround[rip]	 # imgGround.55_38, imgGround
-	mov	ecx, DWORD PTR -16[rbp]	 # tmp238, x
-	lea	rax, -80[rbp]	 # tmp239,
-	mov	r9d, r8d	 #, _37
-	mov	r8d, ecx	 #, tmp238
-	mov	rcx, rax	 #, tmp239
-	call	_ZN7Gdiplus8Graphics9DrawImageEPNS_5ImageEii	 #
+	mov	edx, DWORD PTR -48[rbp]	 # ; edx = groundY (608)
+	mov	eax, DWORD PTR -8[rbp]	 # ; eax = shakeY
+	lea	r8d, [rdx+rax]	 # ; r8d = groundY + shakeY (3-arg DrawImage Y)
+	mov	rdx, QWORD PTR imgGround[rip]	 # ; rdx = imgGround (arg2)
+	mov	ecx, DWORD PTR -16[rbp]	 # ; ecx = x (draw X position)
+	lea	rax, -80[rbp]	 #         ; rax = &graphics
+	mov	r9d, r8d	 #             ; r9d = y (arg4)
+	mov	r8d, ecx	 #             ; r8d = x (arg3)
+	mov	rcx, rax	 #             ; rcx = this (arg1)
+	call	_ZN7Gdiplus8Graphics9DrawImageEPNS_5ImageEii	 # DrawImage(ground, x, groundY+shakeY)
  # src/render.c:180:             x += groundW;
-	mov	eax, DWORD PTR -40[rbp]	 # tmp240, groundW
-	add	DWORD PTR -16[rbp], eax	 # x, tmp240
-.L171:
+	mov	eax, DWORD PTR -40[rbp]	 # ; eax = groundW
+	add	DWORD PTR -16[rbp], eax	 # x += groundW  (advance tile cursor right)
+.L171:                                   # === GROUND LOOP CONDITION ===
  # src/render.c:178:         while (x < WINDOW_WIDTH) {
-	cmp	DWORD PTR -16[rbp], 1279	 # x,
-	jle	.L172	 #,
+	cmp	DWORD PTR -16[rbp], 1279	 # ; x <= 1279 ?  (same as x < 1280)
+	jle	.L172	 #,                  ; yes → draw another tile
+
+	# ===================================================================
+	# LAYER 4: BIRD SPRITE
+	# ===================================================================
 .L170:
  # src/render.c:185:     if (imgBirdFrames[game.birdFrame]) {
-	mov	rax, QWORD PTR .refptr.game[rip]	 # tmp241,
-	mov	eax, DWORD PTR 92[rax]	 # _39, game.birdFrame
+	mov	rax, QWORD PTR .refptr.game[rip]	 #
+	mov	eax, DWORD PTR 92[rax]	 # ; eax = game.birdFrame (0=down, 1=mid, 2=up)
  # src/render.c:185:     if (imgBirdFrames[game.birdFrame]) {
-	cdqe
-	lea	rdx, 0[0+rax*8]	 # tmp243,
-	lea	rax, imgBirdFrames[rip]	 # tmp244,
-	mov	rax, QWORD PTR [rdx+rax]	 # _40, imgBirdFrames[_39]
+	cdqe                                   # sign-extend to 64-bit for array index
+	lea	rdx, 0[0+rax*8]	 #             ; rdx = birdFrame * 8
+	lea	rax, imgBirdFrames[rip]	 #     ; rax = &imgBirdFrames[0]
+	mov	rax, QWORD PTR [rdx+rax]	 #   ; rax = imgBirdFrames[birdFrame]
  # src/render.c:185:     if (imgBirdFrames[game.birdFrame]) {
-	test	rax, rax	 # _40
-	je	.L173	 #,
+	test	rax, rax	 #                ; is the sprite pointer non-NULL?
+	je	.L173	 #,                   ; NULL → skip bird draw
+
+	# bird.y is a float at game+0. Cast to INT for DrawImage.
+	# cvttss2si truncates float→int (e.g. 150.7f → 150).
+	# BIRD_X = 350 is a compile-time constant, folded into lea ecx, 350[rax].
  # src/render.c:186:         graphics.DrawImage(imgBirdFrames[game.birdFrame], BIRD_X + shakeX, (INT)game.bird.y + shakeY);
-	mov	rax, QWORD PTR .refptr.game[rip]	 # tmp245,
-	movss	xmm0, DWORD PTR [rax]	 # _41, game.bird.y
+	mov	rax, QWORD PTR .refptr.game[rip]	 #
+	movss	xmm0, DWORD PTR [rax]	 # ; xmm0 = game.bird.y (float, offset 0)
  # src/render.c:186:         graphics.DrawImage(imgBirdFrames[game.birdFrame], BIRD_X + shakeX, (INT)game.bird.y + shakeY);
-	cvttss2si	edx, xmm0	 # _42, _41
+	cvttss2si	edx, xmm0	 # ; edx = (int)bird.y
  # src/render.c:186:         graphics.DrawImage(imgBirdFrames[game.birdFrame], BIRD_X + shakeX, (INT)game.bird.y + shakeY);
-	mov	eax, DWORD PTR -8[rbp]	 # tmp246, shakeY
-	lea	r8d, [rdx+rax]	 # _43,
-	mov	eax, DWORD PTR -4[rbp]	 # tmp247, shakeX
-	lea	ecx, 350[rax]	 # _44,
+	mov	eax, DWORD PTR -8[rbp]	 # ; eax = shakeY
+	lea	r8d, [rdx+rax]	 # ; r8d = (int)bird.y + shakeY  (Y arg)
+	mov	eax, DWORD PTR -4[rbp]	 # ; eax = shakeX
+	lea	ecx, 350[rax]	 # ; ecx = BIRD_X(350) + shakeX  (X arg)
  # src/render.c:186:         graphics.DrawImage(imgBirdFrames[game.birdFrame], BIRD_X + shakeX, (INT)game.bird.y + shakeY);
-	mov	rax, QWORD PTR .refptr.game[rip]	 # tmp248,
-	mov	eax, DWORD PTR 92[rax]	 # _45, game.birdFrame
+	mov	rax, QWORD PTR .refptr.game[rip]	 #
+	mov	eax, DWORD PTR 92[rax]	 # ; eax = game.birdFrame (re-load for index)
  # src/render.c:186:         graphics.DrawImage(imgBirdFrames[game.birdFrame], BIRD_X + shakeX, (INT)game.bird.y + shakeY);
 	cdqe
-	lea	rdx, 0[0+rax*8]	 # tmp250,
-	lea	rax, imgBirdFrames[rip]	 # tmp251,
-	mov	rdx, QWORD PTR [rdx+rax]	 # _46, imgBirdFrames[_45]
-	lea	rax, -80[rbp]	 # tmp252,
-	mov	r9d, r8d	 #, _43
-	mov	r8d, ecx	 #, _44
-	mov	rcx, rax	 #, tmp252
-	call	_ZN7Gdiplus8Graphics9DrawImageEPNS_5ImageEii	 #
+	lea	rdx, 0[0+rax*8]	 # ; rdx = birdFrame*8
+	lea	rax, imgBirdFrames[rip]	 #
+	mov	rdx, QWORD PTR [rdx+rax]	 # ; rdx = imgBirdFrames[birdFrame]  (arg2)
+	lea	rax, -80[rbp]	 #         ; rax = &graphics
+	mov	r9d, r8d	 #             ; r9d = Y = (int)bird.y + shakeY
+	mov	r8d, ecx	 #             ; r8d = X = BIRD_X + shakeX
+	mov	rcx, rax	 #             ; rcx = &graphics (this)
+	call	_ZN7Gdiplus8Graphics9DrawImageEPNS_5ImageEii	 # DrawImage(birdSprite, x, y)
+
+	# ===================================================================
+	# LAYER 5: PARTICLES
+	# ===================================================================
 .L173:
  # src/render.c:190:     DrawParticles(&graphics);
-	lea	rax, -80[rbp]	 # tmp253,
-	mov	rcx, rax	 #, tmp253
-	call	_Z13DrawParticlesPN7Gdiplus8GraphicsE	 #
+	# Draws all active particles as colored ellipses (see DrawParticles above)
+	lea	rax, -80[rbp]	 #         ; rax = &graphics
+	mov	rcx, rax	 #
+	call	_Z13DrawParticlesPN7Gdiplus8GraphicsE	 # DrawParticles(&graphics)
+
+	# ===================================================================
+	# LAYER 6: IN-GAME SCORE (only while playing, not game-over)
+	# ===================================================================
  # src/render.c:193:     if (game.started && !game.gameOver) {
-	mov	rax, QWORD PTR .refptr.game[rip]	 # tmp254,
-	mov	eax, DWORD PTR 64[rax]	 # _47, game.started
+	mov	rax, QWORD PTR .refptr.game[rip]	 #
+	mov	eax, DWORD PTR 64[rax]	 # ; eax = game.started
  # src/render.c:193:     if (game.started && !game.gameOver) {
-	test	eax, eax	 # _47
-	je	.L174	 #,
+	test	eax, eax	 # ; is game.started != 0?
+	je	.L174	 #,                   ; not started → skip score
  # src/render.c:193:     if (game.started && !game.gameOver) {
-	mov	rax, QWORD PTR .refptr.game[rip]	 # tmp255,
-	mov	eax, DWORD PTR 60[rax]	 # _48, game.gameOver
+	mov	rax, QWORD PTR .refptr.game[rip]	 #
+	mov	eax, DWORD PTR 60[rax]	 # ; eax = game.gameOver
  # src/render.c:193:     if (game.started && !game.gameOver) {
-	test	eax, eax	 # _48
-	jne	.L174	 #,
+	test	eax, eax	 # ; is game.gameOver == 0?
+	jne	.L174	 #,                   ; game over → skip (score shown in gameOver UI instead)
+
+	# DrawScore(&graphics, game.score, WINDOW_WIDTH/2=640, y=30)
+	# Draws score at top-center of screen while player is actively playing
  # src/render.c:194:         DrawScore(&graphics, game.score, WINDOW_WIDTH / 2, 30);
-	mov	rax, QWORD PTR .refptr.game[rip]	 # tmp256,
-	mov	edx, DWORD PTR 52[rax]	 # _49, game.score
-	lea	rax, -80[rbp]	 # tmp257,
-	mov	r9d, 30	 #,
+	mov	rax, QWORD PTR .refptr.game[rip]	 #
+	mov	edx, DWORD PTR 52[rax]	 # ; edx = game.score (arg2)
+	lea	rax, -80[rbp]	 #         ; rax = &graphics
+	mov	r9d, 30	 #,              ; r9d = y = 30  (arg4)
 	mov	r8d, 640	 #,
 	mov	rcx, rax	 #, tmp257
 	call	_Z9DrawScorePN7Gdiplus8GraphicsEiii	 #
+
+	# ===================================================================
+	# LAYER 7: START SCREEN MESSAGE (shown before game starts)
+	# ===================================================================
 .L174:
  # src/render.c:198:     if (!game.started && imgMessage) {
-	mov	rax, QWORD PTR .refptr.game[rip]	 # tmp258,
-	mov	eax, DWORD PTR 64[rax]	 # _50, game.started
+	# Show "message" sprite (get-ready screen) only when game hasn't started yet
+	mov	rax, QWORD PTR .refptr.game[rip]	 #
+	mov	eax, DWORD PTR 64[rax]	 # ; eax = game.started
  # src/render.c:198:     if (!game.started && imgMessage) {
-	test	eax, eax	 # _50
-	jne	.L175	 #,
+	test	eax, eax	 #             ; is started != 0?
+	jne	.L175	 #,                ; yes → skip message (game is running)
  # src/render.c:198:     if (!game.started && imgMessage) {
-	mov	rax, QWORD PTR imgMessage[rip]	 # imgMessage.56_51, imgMessage
+	mov	rax, QWORD PTR imgMessage[rip]	 # ; rax = imgMessage ptr
  # src/render.c:198:     if (!game.started && imgMessage) {
-	test	rax, rax	 # imgMessage.56_51
-	je	.L175	 #,
+	test	rax, rax	 #             ; is imgMessage loaded?
+	je	.L175	 #,                ; no → skip
+
+	# Center the message sprite: x = (1280-msgW)/2,  y = (720-msgH)/2 - 40
+	# The -40 offset shifts the splash screen slightly upward from screen center.
+	# Centering X and Y both use the signed-division-by-2 (SAR+bias) trick.
  # src/render.c:199:         INT msgW = (INT)imgMessage->GetWidth();
-	mov	rax, QWORD PTR imgMessage[rip]	 # imgMessage.57_52, imgMessage
-	mov	rcx, rax	 #, imgMessage.57_52
-	call	_ZN7Gdiplus5Image8GetWidthEv	 #
+	mov	rax, QWORD PTR imgMessage[rip]	 #
+	mov	rcx, rax	 #
+	call	_ZN7Gdiplus5Image8GetWidthEv	 # → msgW in EAX
  # src/render.c:199:         INT msgW = (INT)imgMessage->GetWidth();
-	mov	DWORD PTR -52[rbp], eax	 # msgW, _53
+	mov	DWORD PTR -52[rbp], eax	 # msgW
  # src/render.c:200:         INT msgH = (INT)imgMessage->GetHeight();
-	mov	rax, QWORD PTR imgMessage[rip]	 # imgMessage.58_54, imgMessage
-	mov	rcx, rax	 #, imgMessage.58_54
-	call	_ZN7Gdiplus5Image9GetHeightEv	 #
+	mov	rax, QWORD PTR imgMessage[rip]	 #
+	mov	rcx, rax	 #
+	call	_ZN7Gdiplus5Image9GetHeightEv	 # → msgH in EAX
  # src/render.c:200:         INT msgH = (INT)imgMessage->GetHeight();
-	mov	DWORD PTR -56[rbp], eax	 # msgH, _55
+	mov	DWORD PTR -56[rbp], eax	 # msgH
+
+	# Compute Y = (720 - msgH) / 2 - 40
  # src/render.c:201:         graphics.DrawImage(imgMessage, (WINDOW_WIDTH - msgW) / 2, (WINDOW_HEIGHT - msgH) / 2 - 40);
-	mov	eax, 720	 # tmp259,
-	sub	eax, DWORD PTR -56[rbp]	 # _56, msgH
+	mov	eax, 720	 #                ; 720 = WINDOW_HEIGHT
+	sub	eax, DWORD PTR -56[rbp]	 # ; eax = 720 - msgH
  # src/render.c:201:         graphics.DrawImage(imgMessage, (WINDOW_WIDTH - msgW) / 2, (WINDOW_HEIGHT - msgH) / 2 - 40);
-	mov	edx, eax	 # tmp260, _56
-	shr	edx, 31	 # tmp260,
-	add	eax, edx	 # tmp261, tmp260
-	sar	eax	 # _57
+	mov	edx, eax	 # ; edx = 720 - msgH
+	shr	edx, 31	 # ; sign bit (bias for signed div)
+	add	eax, edx	 # ; bias
+	sar	eax	 # ; eax = (720 - msgH) / 2
  # src/render.c:201:         graphics.DrawImage(imgMessage, (WINDOW_WIDTH - msgW) / 2, (WINDOW_HEIGHT - msgH) / 2 - 40);
-	lea	ecx, -40[rax]	 # _58,
+	lea	ecx, -40[rax]	 # ; ecx = (720-msgH)/2 - 40   ← Y argument
+
+	# Compute X = (1280 - msgW) / 2
  # src/render.c:201:         graphics.DrawImage(imgMessage, (WINDOW_WIDTH - msgW) / 2, (WINDOW_HEIGHT - msgH) / 2 - 40);
-	mov	eax, 1280	 # tmp263,
-	sub	eax, DWORD PTR -52[rbp]	 # _59, msgW
+	mov	eax, 1280	 #               ; 1280 = WINDOW_WIDTH
+	sub	eax, DWORD PTR -52[rbp]	 # ; eax = 1280 - msgW
  # src/render.c:201:         graphics.DrawImage(imgMessage, (WINDOW_WIDTH - msgW) / 2, (WINDOW_HEIGHT - msgH) / 2 - 40);
-	mov	edx, eax	 # tmp264, _59
-	shr	edx, 31	 # tmp264,
-	add	eax, edx	 # tmp265, tmp264
-	sar	eax	 # _60
-	mov	r8d, eax	 # _60, _60
-	mov	rdx, QWORD PTR imgMessage[rip]	 # imgMessage.59_61, imgMessage
-	lea	rax, -80[rbp]	 # tmp267,
-	mov	r9d, ecx	 #, _58
-	mov	rcx, rax	 #, tmp267
-	call	_ZN7Gdiplus8Graphics9DrawImageEPNS_5ImageEii	 #
+	mov	edx, eax	 #
+	shr	edx, 31	 #
+	add	eax, edx	 #
+	sar	eax	 # ; eax = (1280 - msgW) / 2   ← X argument
+	mov	r8d, eax	 # ; r8d = X (arg3)
+	mov	rdx, QWORD PTR imgMessage[rip]	 # ; rdx = imgMessage (arg2)
+	lea	rax, -80[rbp]	 #           ; rax = &graphics
+	mov	r9d, ecx	 # ; r9d = Y (arg4)
+	mov	rcx, rax	 # ; rcx = &graphics (this, arg1)
+	call	_ZN7Gdiplus8Graphics9DrawImageEPNS_5ImageEii	 # DrawImage(imgMessage, X, Y)
+
+	# ===================================================================
+	# LAYER 8: GAME-OVER SCREEN (banner + score)
+	# ===================================================================
 .L175:
  # src/render.c:205:     if (game.gameOver) {
-	mov	rax, QWORD PTR .refptr.game[rip]	 # tmp268,
-	mov	eax, DWORD PTR 60[rax]	 # _62, game.gameOver
+	mov	rax, QWORD PTR .refptr.game[rip]	 #
+	mov	eax, DWORD PTR 60[rax]	 # ; eax = game.gameOver
  # src/render.c:205:     if (game.gameOver) {
-	test	eax, eax	 # _62
-	je	.L176	 #,
+	test	eax, eax	 #             ; is gameOver != 0?
+	je	.L176	 #,                ; no → skip gameover UI
+
+	# Draw "GAME OVER" banner centered horizontally at Y=80
  # src/render.c:206:         if (imgGameOver) {
-	mov	rax, QWORD PTR imgGameOver[rip]	 # imgGameOver.60_63, imgGameOver
+	mov	rax, QWORD PTR imgGameOver[rip]	 #
  # src/render.c:206:         if (imgGameOver) {
-	test	rax, rax	 # imgGameOver.60_63
-	je	.L177	 #,
+	test	rax, rax	 #             ; is imgGameOver loaded?
+	je	.L177	 #,                ; no → skip banner, still draw score
  # src/render.c:207:             INT goW = (INT)imgGameOver->GetWidth();
-	mov	rax, QWORD PTR imgGameOver[rip]	 # imgGameOver.61_64, imgGameOver
-	mov	rcx, rax	 #, imgGameOver.61_64
-	call	_ZN7Gdiplus5Image8GetWidthEv	 #
+	mov	rax, QWORD PTR imgGameOver[rip]	 #
+	mov	rcx, rax	 #
+	call	_ZN7Gdiplus5Image8GetWidthEv	 # → goW in EAX
  # src/render.c:207:             INT goW = (INT)imgGameOver->GetWidth();
-	mov	DWORD PTR -60[rbp], eax	 # goW, _65
+	mov	DWORD PTR -60[rbp], eax	 # goW
+
+	# X = (1280 - goW) / 2  (center horizontally)
  # src/render.c:208:             graphics.DrawImage(imgGameOver, (WINDOW_WIDTH - goW) / 2, 80);
-	mov	eax, 1280	 # tmp269,
-	sub	eax, DWORD PTR -60[rbp]	 # _66, goW
+	mov	eax, 1280	 #
+	sub	eax, DWORD PTR -60[rbp]	 # ; eax = 1280 - goW
  # src/render.c:208:             graphics.DrawImage(imgGameOver, (WINDOW_WIDTH - goW) / 2, 80);
-	mov	edx, eax	 # tmp270, _66
-	shr	edx, 31	 # tmp270,
-	add	eax, edx	 # tmp271, tmp270
-	sar	eax	 # _67
-	mov	ecx, eax	 # _67, _67
-	mov	rdx, QWORD PTR imgGameOver[rip]	 # imgGameOver.62_68, imgGameOver
-	lea	rax, -80[rbp]	 # tmp273,
-	mov	r9d, 80	 #,
-	mov	r8d, ecx	 #, _67
-	mov	rcx, rax	 #, tmp273
-	call	_ZN7Gdiplus8Graphics9DrawImageEPNS_5ImageEii	 #
+	mov	edx, eax	 #
+	shr	edx, 31	 #
+	add	eax, edx	 #
+	sar	eax	 # ; eax = (1280-goW)/2
+	mov	ecx, eax	 # ; ecx = X
+	mov	rdx, QWORD PTR imgGameOver[rip]	 # ; rdx = imgGameOver
+	lea	rax, -80[rbp]	 #
+	mov	r9d, 80	 #,              ; r9d = Y = 80  (fixed position, near top)
+	mov	r8d, ecx	 #             ; r8d = X = centered
+	mov	rcx, rax	 #             ; rcx = &graphics
+	call	_ZN7Gdiplus8Graphics9DrawImageEPNS_5ImageEii	 # DrawImage(gameOver, X, 80)
+
+	# Draw score below the GAME OVER banner (y=200, horizontally centered)
 .L177:
  # src/render.c:212:         DrawScore(&graphics, game.score, WINDOW_WIDTH / 2, 200);
-	mov	rax, QWORD PTR .refptr.game[rip]	 # tmp274,
-	mov	edx, DWORD PTR 52[rax]	 # _69, game.score
-	lea	rax, -80[rbp]	 # tmp275,
-	mov	r9d, 200	 #,
-	mov	r8d, 640	 #,
-	mov	rcx, rax	 #, tmp275
-	call	_Z9DrawScorePN7Gdiplus8GraphicsEiii	 #
+	mov	rax, QWORD PTR .refptr.game[rip]	 #
+	mov	edx, DWORD PTR 52[rax]	 # ; edx = game.score (arg2)
+	lea	rax, -80[rbp]	 #         ; rax = &graphics
+	mov	r9d, 200	 #,            ; r9d = y = 200 (arg4)  — below banner
+	mov	r8d, 640	 #,            ; r8d = centerX = WINDOW_WIDTH/2 = 640 (arg3)
+	mov	rcx, rax	 #             ; rcx = &graphics (arg1)
+	call	_Z9DrawScorePN7Gdiplus8GraphicsEiii	 # DrawScore(&graphics, score, 640, 200)
+
+	# ===================================================================
+	# LAYER 9: BitBlt — COPY BACK-BUFFER TO SCREEN (double-buffer flip)
+	# ===================================================================
 .L176:
+	# This is the most important step: transfers the completed off-screen frame
+	# to the visible window in one atomic memory copy.
+	# Without this, all drawing above happened in an invisible back-buffer.
+	#
+	# BitBlt(HDC dest, x, y, w, h, HDC src, srcX, srcY, DWORD rop)
+	# Win64: args 1-4 in RCX,RDX,R8,R9; args 5-9 pushed on stack (right to left)
+	# SRCCOPY = 0xCC0020 = 13369376 — direct copy (no raster operation)
+	#
+	# Stack layout for BitBlt args (5 extra args beyond the first 4):
+	#   [rsp+32] = WINDOW_HEIGHT = 720   (arg5: height of copy region)
+	#   [rsp+40] = hdcBackBuffer         (arg6: source DC — the back-buffer)
+	#   [rsp+48] = 0                     (arg7: source X = 0)
+	#   [rsp+56] = 0                     (arg8: source Y = 0)
+	#   [rsp+64] = 13369376 = SRCCOPY    (arg9: raster operation code)
  # src/render.c:216:     BitBlt(hdc, 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT, hdcBackBuffer, 0, 0, SRCCOPY);
-	mov	rdx, QWORD PTR hdcBackBuffer[rip]	 # hdcBackBuffer.63_70, hdcBackBuffer
-	mov	rax, QWORD PTR 32[rbp]	 # tmp276, hdc
-	mov	DWORD PTR 64[rsp], 13369376	 #,
-	mov	DWORD PTR 56[rsp], 0	 #,
-	mov	DWORD PTR 48[rsp], 0	 #,
-	mov	QWORD PTR 40[rsp], rdx	 #, hdcBackBuffer.63_70
-	mov	DWORD PTR 32[rsp], 720	 #,
-	mov	r9d, 1280	 #,
-	mov	r8d, 0	 #,
-	mov	edx, 0	 #,
-	mov	rcx, rax	 #, tmp276
-	mov	rax, QWORD PTR __imp_BitBlt[rip]	 # tmp277,
-	call	rax	 # tmp277
-.LEHE10:
+	mov	rdx, QWORD PTR hdcBackBuffer[rip]	 # ; rdx = hdcBackBuffer (source DC)
+	mov	rax, QWORD PTR 32[rbp]	 # ; rax = hdc (destination — screen DC)
+	mov	DWORD PTR 64[rsp], 13369376	 # ; [rsp+64] = SRCCOPY (arg9)
+	mov	DWORD PTR 56[rsp], 0	 #   ; [rsp+56] = srcY = 0 (arg8)
+	mov	DWORD PTR 48[rsp], 0	 #   ; [rsp+48] = srcX = 0 (arg7)
+	mov	QWORD PTR 40[rsp], rdx	 #   ; [rsp+40] = hdcBackBuffer (arg6)
+	mov	DWORD PTR 32[rsp], 720	 #   ; [rsp+32] = height = 720 (arg5)
+	mov	r9d, 1280	 #,              ; r9d = width = 1280 (arg4)
+	mov	r8d, 0	 #,                ; r8d = destY = 0 (arg3)
+	mov	edx, 0	 #,                ; rdx = destX = 0 (arg2)
+	mov	rcx, rax	 #             ; rcx = hdc (dest DC, arg1)
+	mov	rax, QWORD PTR __imp_BitBlt[rip]	 # ; load BitBlt function pointer (IAT)
+	call	rax	 #                 ; BitBlt — screen now shows the completed frame
+
+.LEHE10:                                 # END exception region (all draw calls above)
+
+	# --- EPILOGUE (normal path) ---
+	# Destroy the GDI+ Graphics object (releases GDI+ resources, not the DC itself)
  # src/render.c:217: }
-	lea	rax, -80[rbp]	 # tmp278,
-	mov	rcx, rax	 #, tmp278
-	call	_ZN7Gdiplus8GraphicsD1Ev	 #
-	jmp	.L180	 #
+	lea	rax, -80[rbp]	 #         ; rax = &graphics (stack object)
+	mov	rcx, rax	 #             ; rcx = this
+	call	_ZN7Gdiplus8GraphicsD1Ev	 # Graphics::~Graphics()
+	jmp	.L180	 #               ; jump past exception handler to real epilogue
+
+	# --- EXCEPTION HANDLER PATH (.L179) ---
+	# This code runs ONLY if a C++ exception was thrown during a draw call.
+	# RBX preserved the exception pointer (set before the call that threw).
+	# We still must destroy the Graphics object to avoid resource leaks.
 .L179:
-	mov	rbx, rax	 # tmp280,
-	lea	rax, -80[rbp]	 # tmp279,
-	mov	rcx, rax	 #, tmp279
-	call	_ZN7Gdiplus8GraphicsD1Ev	 #
-	mov	rax, rbx	 # D.135101, tmp280
+	mov	rbx, rax	 # ; rbx = exception object pointer (save before call)
+	lea	rax, -80[rbp]	 # ; rax = &graphics
+	mov	rcx, rax	 # ; rcx = this
+	call	_ZN7Gdiplus8GraphicsD1Ev	 # Graphics::~Graphics()  ← cleanup on exception
+	mov	rax, rbx	 # ; rax = exception object (restore for _Unwind_Resume)
+	mov	rcx, rax	 # ; rcx = exception object
 	mov	rcx, rax	 #, D.135101
-.LEHB11:
-	call	_Unwind_Resume	 #
+.LEHB11:                                 # BEGIN exception region (_Unwind_Resume call)
+	call	_Unwind_Resume	 #           ; re-throw the exception after Graphics cleanup
 	nop	
-.LEHE11:
+.LEHE11:                                 # END exception region
+
+# === NORMAL EPILOGUE (executed on clean return from DrawGame) ===
 .L180:
-	add	rsp, 168	 #,
-	pop	rbx	 #
-	pop	rbp	 #
-	ret	
+	add	rsp, 168	 #,             ; deallocate 168-byte stack frame (locals + shadow)
+	pop	rbx	 #                 ; restore callee-saved RBX (used in screen shake div)
+	pop	rbp	 #                 ; restore caller's frame pointer
+	ret	                            # return to WndProc caller (DrawGame returns void)
+	# SEH personality function:
+	# __gxx_personality_seh0 handles C++ exceptions on Windows SEH.
+	# It reads .LLSDA8698 to decide which cleanup code to run.
 	.seh_handler	__gxx_personality_seh0, @unwind, @except
 	.seh_handlerdata
+
+# ============================================================================
+# LSDA (Language Specific Data Area) — exception cleanup map for DrawGame
+# ============================================================================
+# The C++ runtime reads this table during stack unwinding to find landing pads.
+# Each entry covers one guarded instruction region and names its handler.
+#
+# Entry format (4 uleb128 values each):
+#   cs_start  : offset from function start (.LEHB - .LFB)
+#   cs_len    : length of guarded region   (.LEHE - .LEHB)
+#   cs_lp     : landing pad offset (0 = none, else .Lxx - .LFB)
+#   cs_action : action index (0 = no type filter / cleanup only)
+#
+# Region 1: .LEHB9 → .LEHE9  (Graphics constructor)
+#   cs_lp = 0 → if ctor throws, no cleanup (object is not yet constructed)
+#
+# Region 2: .LEHB10 → .LEHE10  (all GDI+ draw calls after construction)
+#   cs_lp = .L179 → if any draw call throws, jump to .L179 to call ~Graphics()
+#
+# Region 3: .LEHB11 → .LEHE11  (_Unwind_Resume)
+#   cs_lp = 0 → let the re-throw propagate upward, no further cleanup here
+# ============================================================================
 .LLSDA8698:
-	.byte	0xff
-	.byte	0xff
-	.byte	0x1
-	.uleb128 .LLSDACSE8698-.LLSDACSB8698
-.LLSDACSB8698:
-	.uleb128 .LEHB9-.LFB8698
-	.uleb128 .LEHE9-.LEHB9
-	.uleb128 0
-	.uleb128 0
-	.uleb128 .LEHB10-.LFB8698
-	.uleb128 .LEHE10-.LEHB10
-	.uleb128 .L179-.LFB8698
-	.uleb128 0
-	.uleb128 .LEHB11-.LFB8698
-	.uleb128 .LEHE11-.LEHB11
-	.uleb128 0
-	.uleb128 0
-.LLSDACSE8698:
+	.byte	0xff         # @LPStart encoding: 0xff = omitted (use function base)
+	.byte	0xff         # @TType encoding:   0xff = omitted (no catch type filters)
+	.byte	0x1          # call-site encoding: 0x01 = uleb128 values
+	.uleb128 .LLSDACSE8698-.LLSDACSB8698   # total size of call-site table in bytes
+.LLSDACSB8698:           # === call-site table entries ===
+
+	# Entry 1: Graphics constructor — no cleanup landing pad
+	.uleb128 .LEHB9-.LFB8698     # cs_start: offset to start of ctor region
+	.uleb128 .LEHE9-.LEHB9       # cs_len:   length of ctor region
+	.uleb128 0                   # cs_lp:    0 = no landing pad (ctor incomplete → skip dtor)
+	.uleb128 0                   # cs_action: 0 (no type filter)
+
+	# Entry 2: All draw calls — cleanup landing pad at .L179
+	.uleb128 .LEHB10-.LFB8698    # cs_start: offset to start of draw call region
+	.uleb128 .LEHE10-.LEHB10     # cs_len:   length of draw call region
+	.uleb128 .L179-.LFB8698      # cs_lp:    .L179 = call ~Graphics() then re-throw
+	.uleb128 0                   # cs_action: 0
+
+	# Entry 3: _Unwind_Resume — no further cleanup
+	.uleb128 .LEHB11-.LFB8698    # cs_start: offset to _Unwind_Resume region
+	.uleb128 .LEHE11-.LEHB11     # cs_len:   length
+	.uleb128 0                   # cs_lp:    0 = no handler, let exception propagate
+	.uleb128 0                   # cs_action: 0
+.LLSDACSE8698:                   # end of call-site table
 	.text
 	.seh_endproc
+
+# ============================================================================
+# C++ VTABLE AND RTTI DATA — GDI+ Class Metadata
+# ============================================================================
+# This section is entirely compiler-generated C++ infrastructure.
+# It is NOT game logic — you can safely skip it for game understanding.
+#
+# WHY IT EXISTS HERE:
+#   render.c includes <gdiplus.h> which defines inline virtual methods for
+#   Gdiplus::Image, Gdiplus::Brush, and Gdiplus::SolidBrush.
+#   The compiler emits their vtables and RTTI into THIS translation unit.
+#
+# VTABLES (_ZTVN...):
+#   A vtable (virtual function table) is an array of function pointers.
+#   Every C++ object with virtual methods stores a hidden vtable pointer
+#   at offset 0 of the object.  Virtual calls dispatch through this table.
+#
+#   Layout of each vtable:
+#     [+0]  = 0            ; "top offset" (0 = primary vtable, not a base subobject)
+#     [+8]  = _ZTI...      ; pointer to RTTI type_info object for dynamic_cast
+#     [+16] = D1 dtor ptr  ; "complete object destructor" — destroys + cleans up
+#     [+24] = D0 dtor ptr  ; "deleting destructor"        — D1 + operator delete
+#     [+32] = Clone()      ; virtual Clone() method pointer
+#
+#   _ZTVN7Gdiplus10SolidBrushE = vtable for Gdiplus::SolidBrush
+#   _ZTVN7Gdiplus5BrushE       = vtable for Gdiplus::Brush (SolidBrush base class)
+#   _ZTVN7Gdiplus5ImageE       = vtable for Gdiplus::Image
+#
+# RTTI objects (_ZTIN...): "type info" used by dynamic_cast and exception handling
+#   Each contains: a pointer to the vtable of the RTTI class, a pointer to the
+#   type name string, and (for derived classes) a pointer to the base type_info.
+#   _ZTIN7Gdiplus10SolidBrushE = typeinfo for Gdiplus::SolidBrush
+#   _ZTIN7Gdiplus5BrushE       = typeinfo for Gdiplus::Brush
+#   _ZTIN7Gdiplus5ImageE       = typeinfo for Gdiplus::Image
+#   _ZTIN7Gdiplus11GdiplusBaseE = typeinfo for Gdiplus::GdiplusBase (root)
+#
+# TYPE NAME STRINGS (_ZTSN...): mangled class name as a null-terminated string
+#   Used by typeid(obj).name().  e.g. "N7Gdiplus5ImageE" = Gdiplus::Image
+#
+# .linkonce same_size DIRECTIVE:
+#   Every .cpp that includes <gdiplus.h> emits its own copy of these vtables.
+#   .linkonce same_size tells the linker: "keep only ONE copy; if sizes differ,
+#   keep the largest."  This prevents multiply-defined symbol link errors.
+#   In practice all copies are identical so any one is kept.
+# ============================================================================
 	.globl	_ZTVN7Gdiplus10SolidBrushE
 	.section	.rdata$_ZTVN7Gdiplus10SolidBrushE,"dr"
 	.linkonce same_size
 	.align 8
+# --- vtable for Gdiplus::SolidBrush ---
+# SolidBrush extends Brush (which extends GdiplusBase).
+# DrawParticles constructs SolidBrush on the stack; virtual destructor is called
+# at scope exit via this vtable.
 _ZTVN7Gdiplus10SolidBrushE:
-	.quad	0
-	.quad	_ZTIN7Gdiplus10SolidBrushE
-	.quad	_ZN7Gdiplus10SolidBrushD1Ev
-	.quad	_ZN7Gdiplus10SolidBrushD0Ev
-	.quad	_ZNK7Gdiplus10SolidBrush5CloneEv
+	.quad	0                                  # top_offset = 0 (this IS the primary object)
+	.quad	_ZTIN7Gdiplus10SolidBrushE         # ptr to SolidBrush RTTI type_info
+	.quad	_ZN7Gdiplus10SolidBrushD1Ev        # [vtable slot 0] complete dtor  SolidBrush::~SolidBrush()
+	.quad	_ZN7Gdiplus10SolidBrushD0Ev        # [vtable slot 1] deleting dtor  (D1 + operator delete)
+	.quad	_ZNK7Gdiplus10SolidBrush5CloneEv   # [vtable slot 2] Clone() — returns a heap copy
 	.globl	_ZTVN7Gdiplus5BrushE
 	.section	.rdata$_ZTVN7Gdiplus5BrushE,"dr"
 	.linkonce same_size
 	.align 8
+# --- vtable for Gdiplus::Brush (base class of SolidBrush) ---
 _ZTVN7Gdiplus5BrushE:
-	.quad	0
-	.quad	_ZTIN7Gdiplus5BrushE
-	.quad	_ZN7Gdiplus5BrushD1Ev
-	.quad	_ZN7Gdiplus5BrushD0Ev
-	.quad	_ZNK7Gdiplus5Brush5CloneEv
+	.quad	0                                  # top_offset = 0
+	.quad	_ZTIN7Gdiplus5BrushE               # ptr to Brush RTTI type_info
+	.quad	_ZN7Gdiplus5BrushD1Ev              # [slot 0] complete dtor  Brush::~Brush()
+	.quad	_ZN7Gdiplus5BrushD0Ev              # [slot 1] deleting dtor
+	.quad	_ZNK7Gdiplus5Brush5CloneEv         # [slot 2] Clone() — pure virtual in Brush
 	.globl	_ZTVN7Gdiplus5ImageE
 	.section	.rdata$_ZTVN7Gdiplus5ImageE,"dr"
 	.linkonce same_size
 	.align 8
+# --- vtable for Gdiplus::Image ---
+# Image is the base of all sprite types.  CleanupGraphics deletes Image* pointers;
+# the virtual destructor in this table ensures proper cleanup.
 _ZTVN7Gdiplus5ImageE:
-	.quad	0
-	.quad	_ZTIN7Gdiplus5ImageE
-	.quad	_ZN7Gdiplus5ImageD1Ev
-	.quad	_ZN7Gdiplus5ImageD0Ev
-	.quad	_ZNK7Gdiplus5Image5CloneEv
+	.quad	0                                  # top_offset = 0
+	.quad	_ZTIN7Gdiplus5ImageE               # ptr to Image RTTI type_info
+	.quad	_ZN7Gdiplus5ImageD1Ev              # [slot 0] complete dtor  Image::~Image()
+	.quad	_ZN7Gdiplus5ImageD0Ev              # [slot 1] deleting dtor  (called by  delete ptr)
+	.quad	_ZNK7Gdiplus5Image5CloneEv         # [slot 2] Clone()
 	.globl	_ZTIN7Gdiplus10SolidBrushE
 	.section	.rdata$_ZTIN7Gdiplus10SolidBrushE,"dr"
 	.linkonce same_size
 	.align 8
+# --- RTTI type_info object for Gdiplus::SolidBrush ---
+# __si_class_type_info = single-inheritance class with one direct base.
+# Layout: [vtable of si_class_type_info, type name string, base class type_info ptr]
 _ZTIN7Gdiplus10SolidBrushE:
- # <anonymous>:
- # <anonymous>:
-	.quad	_ZTVN10__cxxabiv120__si_class_type_infoE+16
- # <anonymous>:
-	.quad	_ZTSN7Gdiplus10SolidBrushE
- # <anonymous>:
-	.quad	_ZTIN7Gdiplus5BrushE
+	.quad	_ZTVN10__cxxabiv120__si_class_type_infoE+16   # typeinfo vtable ptr (skip top_offset+rtti slots)
+	.quad	_ZTSN7Gdiplus10SolidBrushE                    # ptr to mangled name string
+	.quad	_ZTIN7Gdiplus5BrushE                           # ptr to base class (Brush) type_info
 	.globl	_ZTSN7Gdiplus10SolidBrushE
 	.section	.rdata$_ZTSN7Gdiplus10SolidBrushE,"dr"
 	.linkonce same_size
 	.align 16
+# --- Type name string for Gdiplus::SolidBrush ---
 _ZTSN7Gdiplus10SolidBrushE:
-	.ascii "N7Gdiplus10SolidBrushE\0"
+	.ascii "N7Gdiplus10SolidBrushE\0"   # typeid(SolidBrush).name() returns this
+
 	.globl	_ZTIN7Gdiplus5BrushE
 	.section	.rdata$_ZTIN7Gdiplus5BrushE,"dr"
 	.linkonce same_size
 	.align 8
+# --- RTTI type_info object for Gdiplus::Brush ---
+# Single-inheritance: base is GdiplusBase.
 _ZTIN7Gdiplus5BrushE:
- # <anonymous>:
- # <anonymous>:
-	.quad	_ZTVN10__cxxabiv120__si_class_type_infoE+16
- # <anonymous>:
-	.quad	_ZTSN7Gdiplus5BrushE
- # <anonymous>:
-	.quad	_ZTIN7Gdiplus11GdiplusBaseE
+	.quad	_ZTVN10__cxxabiv120__si_class_type_infoE+16   # typeinfo vtable ptr
+	.quad	_ZTSN7Gdiplus5BrushE                          # ptr to "N7Gdiplus5BrushE\0"
+	.quad	_ZTIN7Gdiplus11GdiplusBaseE                   # ptr to base class (GdiplusBase) type_info
 	.globl	_ZTSN7Gdiplus5BrushE
 	.section	.rdata$_ZTSN7Gdiplus5BrushE,"dr"
 	.linkonce same_size
 	.align 16
+# --- Type name string for Gdiplus::Brush ---
 _ZTSN7Gdiplus5BrushE:
-	.ascii "N7Gdiplus5BrushE\0"
+	.ascii "N7Gdiplus5BrushE\0"         # typeid(Brush).name() returns this
+
 	.globl	_ZTIN7Gdiplus5ImageE
 	.section	.rdata$_ZTIN7Gdiplus5ImageE,"dr"
 	.linkonce same_size
 	.align 8
+# --- RTTI type_info object for Gdiplus::Image ---
+# Single-inheritance: base is GdiplusBase.
+# This is used when catching exceptions of type Image* or doing dynamic_cast<Image*>.
 _ZTIN7Gdiplus5ImageE:
- # <anonymous>:
- # <anonymous>:
-	.quad	_ZTVN10__cxxabiv120__si_class_type_infoE+16
- # <anonymous>:
-	.quad	_ZTSN7Gdiplus5ImageE
- # <anonymous>:
-	.quad	_ZTIN7Gdiplus11GdiplusBaseE
+	.quad	_ZTVN10__cxxabiv120__si_class_type_infoE+16   # typeinfo vtable ptr
+	.quad	_ZTSN7Gdiplus5ImageE                          # ptr to "N7Gdiplus5ImageE\0"
+	.quad	_ZTIN7Gdiplus11GdiplusBaseE                   # ptr to base class (GdiplusBase) type_info
 	.globl	_ZTSN7Gdiplus5ImageE
 	.section	.rdata$_ZTSN7Gdiplus5ImageE,"dr"
 	.linkonce same_size
 	.align 16
+# --- Type name string for Gdiplus::Image ---
 _ZTSN7Gdiplus5ImageE:
-	.ascii "N7Gdiplus5ImageE\0"
+	.ascii "N7Gdiplus5ImageE\0"         # typeid(Image).name() returns this
+
 	.globl	_ZTIN7Gdiplus11GdiplusBaseE
 	.section	.rdata$_ZTIN7Gdiplus11GdiplusBaseE,"dr"
 	.linkonce same_size
 	.align 8
+# --- RTTI type_info object for Gdiplus::GdiplusBase (root class) ---
+# __class_type_info = a leaf class with no base classes (or the hierarchy root).
+# GdiplusBase is the ultimate base for all GDI+ objects.
 _ZTIN7Gdiplus11GdiplusBaseE:
- # <anonymous>:
- # <anonymous>:
-	.quad	_ZTVN10__cxxabiv117__class_type_infoE+16
- # <anonymous>:
-	.quad	_ZTSN7Gdiplus11GdiplusBaseE
+	.quad	_ZTVN10__cxxabiv117__class_type_infoE+16      # class_type_info vtable (not si_ — no base)
+	.quad	_ZTSN7Gdiplus11GdiplusBaseE                   # ptr to "N7Gdiplus11GdiplusBaseE\0"
 	.globl	_ZTSN7Gdiplus11GdiplusBaseE
 	.section	.rdata$_ZTSN7Gdiplus11GdiplusBaseE,"dr"
 	.linkonce same_size
 	.align 16
+# --- Type name string for Gdiplus::GdiplusBase ---
 _ZTSN7Gdiplus11GdiplusBaseE:
-	.ascii "N7Gdiplus11GdiplusBaseE\0"
+	.ascii "N7Gdiplus11GdiplusBaseE\0"  # typeid(GdiplusBase).name() returns this
+# ============================================================================
+# FLOAT CONSTANT — pipe rotation angle
+# ============================================================================
 	.section .rdata,"dr"
 	.align 4
 .LC16:
-	.long	1127481344
-	.def	__gxx_personality_seh0;	.scl	2;	.type	32;	.endef
-	.ident	"GCC: (MinGW-W64 x86_64-msvcrt-posix-seh, built by Brecht Sanders, r1) 15.2.0"
-	.def	GdipAlloc;	.scl	2;	.type	32;	.endef
-	.def	GdipFree;	.scl	2;	.type	32;	.endef
-	.def	GdipDisposeImage;	.scl	2;	.type	32;	.endef
-	.def	GdipCloneImage;	.scl	2;	.type	32;	.endef
-	.def	GdipDeleteBrush;	.scl	2;	.type	32;	.endef
-	.def	GdipCreateSolidFill;	.scl	2;	.type	32;	.endef
-	.def	_Unwind_Resume;	.scl	2;	.type	32;	.endef
-	.def	GdipCloneBrush;	.scl	2;	.type	32;	.endef
-	.def	GdipCreateFromHDC;	.scl	2;	.type	32;	.endef
-	.def	GdipDeleteGraphics;	.scl	2;	.type	32;	.endef
-	.def	GdipDrawImageI;	.scl	2;	.type	32;	.endef
-	.def	GdipDrawImageRectI;	.scl	2;	.type	32;	.endef
-	.def	GdipFillEllipseI;	.scl	2;	.type	32;	.endef
-	.def	GdipResetWorldTransform;	.scl	2;	.type	32;	.endef
-	.def	GdipRotateWorldTransform;	.scl	2;	.type	32;	.endef
-	.def	GdipSetInterpolationMode;	.scl	2;	.type	32;	.endef
-	.def	GdipTranslateWorldTransform;	.scl	2;	.type	32;	.endef
-	.def	GdipLoadImageFromFileICM;	.scl	2;	.type	32;	.endef
-	.def	GdipLoadImageFromFile;	.scl	2;	.type	32;	.endef
-	.def	GdipGetImageHeight;	.scl	2;	.type	32;	.endef
-	.def	GdipGetImageWidth;	.scl	2;	.type	32;	.endef
-	.def	GdiplusStartup;	.scl	2;	.type	32;	.endef
-	.def	GdiplusShutdown;	.scl	2;	.type	32;	.endef
-	.def	strlen;	.scl	2;	.type	32;	.endef
-	.def	rand;	.scl	2;	.type	32;	.endef
+	# IEEE 754: 0x43340000 = 180.0f — angle passed to RotateTransform(180.0f)
+	# to draw the top pipe upside-down.
+	.long	1127481344         # = 0x43340000 = 180.0f
+
+# ============================================================================
+# EXTERNAL SYMBOL DECLARATIONS (.def directives)
+# ============================================================================
+# Each .def names an external function imported from a DLL at link time.
+# .scl 2 = C_EXT (external/public)   .type 32 = function symbol
+# These are metadata only — they do not generate executable code.
+	.def	__gxx_personality_seh0;	.scl	2;	.type	32;	.endef  # C++ SEH personality (libgcc)
+	.ident	"GCC: (MinGW-W64 x86_64-msvcrt-posix-seh, built by Brecht Sanders, r1) 15.2.0"  # compiler ID string
+	# --- GDI+ C API (gdiplus.dll raw C functions — called by C++ wrappers above) ---
+	.def	GdipAlloc;	.scl	2;	.type	32;	.endef              # heap alloc for GDI+ objects
+	.def	GdipFree;	.scl	2;	.type	32;	.endef               # heap free for GDI+ objects
+	.def	GdipDisposeImage;	.scl	2;	.type	32;	.endef      # Image::~Image() C API
+	.def	GdipCloneImage;	.scl	2;	.type	32;	.endef          # Image::Clone() C API
+	.def	GdipDeleteBrush;	.scl	2;	.type	32;	.endef       # Brush::~Brush() C API
+	.def	GdipCreateSolidFill;	.scl	2;	.type	32;	.endef   # SolidBrush(color) C API — used in DrawParticles
+	.def	_Unwind_Resume;	.scl	2;	.type	32;	.endef          # re-throw C++ exception (libgcc/SEH)
+	.def	GdipCloneBrush;	.scl	2;	.type	32;	.endef          # Brush::Clone() C API
+	.def	GdipCreateFromHDC;	.scl	2;	.type	32;	.endef      # Graphics(HDC) C API — DrawGame ctor
+	.def	GdipDeleteGraphics;	.scl	2;	.type	32;	.endef     # ~Graphics() C API — DrawGame dtor
+	.def	GdipDrawImageI;	.scl	2;	.type	32;	.endef          # DrawImage(img, x, y) C API
+	.def	GdipDrawImageRectI;	.scl	2;	.type	32;	.endef     # DrawImage(img, x, y, w, h) C API
+	.def	GdipFillEllipseI;	.scl	2;	.type	32;	.endef       # FillEllipse(brush,x,y,w,h) — DrawParticles
+	.def	GdipResetWorldTransform;	.scl	2;	.type	32;	.endef # ResetTransform() — after pipe draw
+	.def	GdipRotateWorldTransform;	.scl	2;	.type	32;	.endef # RotateTransform(180) — top pipe flip
+	.def	GdipSetInterpolationMode;	.scl	2;	.type	32;	.endef # SetInterpolationMode(nearest) — no blur
+	.def	GdipTranslateWorldTransform;	.scl	2;	.type	32;	.endef # TranslateTransform(x,y) — pipe origin
+	.def	GdipLoadImageFromFileICM;	.scl	2;	.type	32;	.endef # Image::FromFile with ICM color management
+	.def	GdipLoadImageFromFile;	.scl	2;	.type	32;	.endef  # Image::FromFile without ICM — used in LoadImages
+	.def	GdipGetImageHeight;	.scl	2;	.type	32;	.endef      # Image::GetHeight() — pipe/ground sizing
+	.def	GdipGetImageWidth;	.scl	2;	.type	32;	.endef       # Image::GetWidth() — pipe/ground/digit sizing
+	.def	GdiplusStartup;	.scl	2;	.type	32;	.endef          # GdiplusStartup() — InitGraphics
+	.def	GdiplusShutdown;	.scl	2;	.type	32;	.endef        # GdiplusShutdown() — CleanupGraphics
+	# --- C runtime library ---
+	.def	strlen;	.scl	2;	.type	32;	.endef                  # strlen() — DrawScore (count digits)
+	.def	rand;	.scl	2;	.type	32;	.endef                    # rand() — DrawGame screen shake offsets
+
+# ============================================================================
+# CROSS-TRANSLATION-UNIT INDIRECTION POINTERS (.refptr)
+# ============================================================================
+# game[] and particles[] are defined in game.c (a separate translation unit).
+# render.c cannot access them with simple [rip]-relative addressing because
+# the linker needs to resolve the addresses at link time.
+#
+# Solution: the linker generates these 8-byte pointer slots in .rdata.
+# Code loads the POINTER to the global, then dereferences it:
+#   mov rax, .refptr.game[rip]    ; rax = address of 'game' global
+#   mov eax, [rax + 52]           ; eax = game.score
+#
+# .linkonce discard: if multiple .o files emit the same .refptr (e.g. if
+# render.c were included twice), the linker keeps only one copy.
+# ============================================================================
 	.section	.rdata$.refptr.game, "dr"
-	.p2align	3, 0
+	.p2align	3, 0          # align to 8 bytes (pointer size)
 	.globl	.refptr.game
-	.linkonce	discard
+	.linkonce	discard       # discard duplicates at link time
 .refptr.game:
-	.quad	game
+	.quad	game              # 8-byte slot: &game (GameState struct defined in game.c)
+
 	.section	.rdata$.refptr.particles, "dr"
-	.p2align	3, 0
+	.p2align	3, 0          # align to 8 bytes
 	.globl	.refptr.particles
-	.linkonce	discard
+	.linkonce	discard       # discard duplicates at link time
 .refptr.particles:
-	.quad	particles
+	.quad	particles         # 8-byte slot: &particles (Particle[MAX_PARTICLES] in game.c)
+
+# ============================================================================
+# END OF render.asm
+# ============================================================================
+# Reading guide recap:
+#   Lines 1  - ~1640 : GDI+ inlined C++ library code  (skip on first read)
+#   Lines ~1640-1800 : GetMedalText, GetMedalColor, LoadImages, InitGraphics,
+#                      CleanupGraphics (sprite loading and lifecycle)
+#   Lines ~1800-3095 : DrawParticles, DrawScore (particles + digit rendering)
+#   Lines ~3095-4094 : DrawGame (master frame renderer, 9-layer painter's algo)
+#   Lines 4094-end   : C++ vtables, RTTI objects, .def imports, .refptr slots
+# ============================================================================

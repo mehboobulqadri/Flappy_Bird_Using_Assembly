@@ -110,21 +110,23 @@ _Z9InitAudiov:                          # === InitAudio() entry point ===
 	# Standard x64 frame setup. Every function does this.
 	push	rbp                     # Save caller's base pointer onto the stack
 	.seh_pushreg	rbp             # (SEH metadata: we pushed rbp)
-	mov	rbp, rsp                # Set rbp = current stack top (our frame base)
+	mov	rbp, rsp                    # Set rbp = current stack top (our frame base)
 	.seh_setframe	rbp, 0          # (SEH metadata: rbp is frame pointer at offset 0)
-	sub	rsp, 48                 # Allocate 48 bytes on stack:
-	                                #   4 bytes for 'numDevices' local variable
-	                                #   12 bytes padding (alignment)
-	                                #   32 bytes shadow space (Win64 ABI requirement)
+	sub	rsp, 48                     # Allocate 48 bytes on stack:
+	                                # 4 bytes for 'numDevices' local variable
+	                                # 12 bytes padding (alignment)
+	                                # 32 bytes shadow space (Win64 ABI requirement)
 	.seh_stackalloc	48              # (SEH metadata: we allocated 48 bytes)
 	.seh_endprologue                # (SEH metadata: prologue is done)
 
-	# --- C LINE: UINT numDevices = waveOutGetNumDevs(); ---
-	# waveOutGetNumDevs() is a Win32 API (winmm.dll) that returns the
-	# number of WAVE audio output devices on this system.
-	# It takes no arguments, returns UINT in EAX.
-	# The __imp_ prefix means the call goes through the Windows import table
-	# (dynamic linking to winmm.dll).
+	/*
+	--- C LINE: UINT numDevices = waveOutGetNumDevs(); ---
+	waveOutGetNumDevs() is a Win32 API (winmm.dll) that returns the
+	number of WAVE audio output devices on this system.
+	It takes no arguments, returns UINT in EAX.
+	The __imp_ prefix means the call goes through the Windows import table
+	(dynamic linking to winmm.dll).
+	*/
 	mov	rax, QWORD PTR __imp_waveOutGetNumDevs[rip]  # Load the function pointer
 	call	rax                     # Call waveOutGetNumDevs() -> result in EAX
 

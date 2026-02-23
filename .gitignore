@@ -1,6 +1,5 @@
 # ============================================================
 # Flappy Bird — COAL Assembly Project
-# Windows / MinGW-W64 / GDI+
 # ============================================================
 
 # ----- Build artifacts -----
@@ -10,14 +9,13 @@ build/
 *.exe
 *.out
 
-# ----- GDI+ / Windows libs (if accidentally produced) -----
+# ----- Game save data -----
+*.dat
+
+# ----- Windows libs (if accidentally produced) -----
 *.dll
 *.lib
 *.a
-
-# ----- Game save data -----
-flappy_highscore.dat
-*.dat
 
 # ----- Temporary / editor files -----
 *.tmp
@@ -25,12 +23,15 @@ flappy_highscore.dat
 *.bak
 *.swp
 *.swo
+*.log
 *~
 
-# ----- IDE folders -----
+# ----- IDE / tool folders -----
 .vscode/
 .idea/
 .vs/
+.zencoder/
+.zenflow/
 *.suo
 *.user
 *.code-workspace
@@ -39,7 +40,3 @@ flappy_highscore.dat
 Thumbs.db
 Desktop.ini
 $RECYCLE.BIN/
-
-# ----- Zencoder AI tool folders -----
-.zencoder/
-.zenflow/
